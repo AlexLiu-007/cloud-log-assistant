@@ -1,0 +1,3 @@
+# Azure and local processing use the Python standard library.
+# Only the Volcengine TLS adapter needs this SDK.
+volcengine==1.0.228

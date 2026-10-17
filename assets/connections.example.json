@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "window_seconds": 300,
+  "output_timezone": "+08:00",
+  "notifications": {
+    "feishu-alerts": {
+      "provider": "feishu",
+      "webhook_env": "FEISHU_WEBHOOK",
+      "secret_env": "FEISHU_SECRET",
+      "keyword_env": "FEISHU_KEYWORD",
+      "timeout_seconds": 30
+    }
+  },
+  "connections": [
+    {
+      "id": "azure-ai",
+      "enabled": true,
+      "provider": "azure_log_analytics",
+      "service": "anspire-gateway",
+      "environment": ".ai",
+      "profile": "profiles/gateway.json",
+      "workspace_id_env": "LOG_ANALYTICS_WORKSPACE_ID",
+      "tenant_id_env": "AZURE_LOG_TENANT_ID",
+      "client_id_env": "AZURE_LOG_CLIENT_ID",
+      "client_secret_env": "AZURE_LOG_CLIENT_SECRET",
+      "table": "ContainerLogV2",
+      "time_column": "TimeGenerated",
+      "content_column": "LogMessage",
+      "container_column": "ContainerName",
+      "containers": ["anspire-llm-gateway-svc", "anspire-llm-gateway-hk-svc", "anspire-llm-gateway-worker-svc", "anspire-llm-gateway-worker-hk-svc"],
+      "max_rows": 10000,
+      "timeout_seconds": 60
+    },
+    {
+      "id": "volc-cn",
+      "enabled": true,
+      "provider": "volcengine_tls",
+      "service": "anspire-gateway",
+      "environment": ".cn",
+      "profile": "profiles/gateway.json",
+      "topic_id_env": "VOLC_LOG_TOPIC_ID",
+      "endpoint": "tls-cn-shanghai.volces.com",
+      "region": "cn-shanghai",
+      "access_key_env": "VOLC_ACCESS_KEY",
+      "secret_key_env": "VOLC_SECRET_KEY",
+      "session_token_env": "VOLC_SESSION_TOKEN",
+      "containers": ["anspire-llm-gateway-svc"],
+      "max_rows": 10000,
+      "max_pages": 100,
+      "timeout_seconds": 30
+    },
+    {
+      "id": "volc-plugin",
+      "enabled": false,
+      "provider": "volcengine_tls",
+      "service": "plugin-api",
+      "environment": ".cn",
+      "profile": "profiles/plugin-api.json",
+      "topic_ids_env": "VOLC_PLUGIN_LOG_TOPIC_IDS",
+      "endpoint": "tls-cn-shanghai.volces.com",
+      "region": "cn-shanghai",
+      "access_key_env": "VOLC_ACCESS_KEY",
+      "secret_key_env": "VOLC_SECRET_KEY",
+      "session_token_env": "VOLC_SESSION_TOKEN",
+      "containers": ["plugin-api-svc"],
+      "max_rows": 10000,
+      "max_pages": 100,
+      "timeout_seconds": 30
+    }
+  ]
+}

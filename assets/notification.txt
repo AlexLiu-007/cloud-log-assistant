@@ -1,0 +1,28 @@
+日志告警｜${service}｜${environment}
+
+发生时间：${timestamp}
+日志来源：${provider} / ${connection_id} / ${resource}
+日志级别：${level}
+事件标识：${event_id}
+请求标识：${request_identity}
+请求人：${actor}
+授权信息：${authorization}
+请求路径：${method} ${path}
+${operation_line}请求模型：${model}
+上游信息：${upstream_provider} / ${upstream_channel} / ${upstream_model}
+响应状态：${response_label} ${gateway_status} / 上游 ${upstream_status}
+
+【关联与追踪】
+关联方式：${association_mode}
+关联依据：${association_evidence}
+追踪完整性：${completeness}
+请求结果：${outcome}
+
+【具体错误】
+错误代码：${error_code}
+错误类型：${error_type}
+错误信息：${error_message}
+
+【错误分析】
+分析：${judgment}
+建议：${recommendation}

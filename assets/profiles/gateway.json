@@ -1,0 +1,12 @@
+{
+  "parser": "gateway",
+  "timezone": "+08:00",
+  "fields": {
+    "actor": ["user_id", "user_name", "app_id", "application_id", "request.user_id"],
+    "authorization": ["auth_key", "authorization", "headers.Authorization", "headers.X-API-Key", "request.headers.Authorization", "request.headers.X-API-Key", "request.auth_key"],
+    "business_id": ["job_id", "task_id", "message_id"]
+  },
+  "heuristic_window_seconds": 30,
+  "heuristic_fields": ["path", "actor", "model"],
+  "not_applicable": []
+}

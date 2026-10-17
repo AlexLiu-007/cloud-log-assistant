@@ -1,0 +1,72 @@
+# 统一消息与 IM 配置
+
+## 飞书自定义机器人
+
+首版实现飞书 Webhook 主动通知，无需用户运行特定 Agent 客户端，也不需要飞书长连接机器人或开放平台应用。
+
+在主配置的 `notifications` 中定义渠道：
+
+```json
+{
+  "feishu-alerts": {
+    "provider": "feishu",
+    "webhook_env": "FEISHU_WEBHOOK",
+    "secret_env": "FEISHU_SECRET",
+    "keyword_env": "FEISHU_KEYWORD",
+    "timeout_seconds": 30
+  }
+}
+```
+
+`FEISHU_WEBHOOK` 支持单个 HTTPS 地址，以及现有的机器人 JSON 数组格式：
+
+```dotenv
+FEISHU_WEBHOOK=[{"webhook":"https://open.feishu.cn/open-apis/bot/v2/hook/BOT_A","secret":"BOT_A_SECRET"},{"webhook":"https://open.feishu.cn/open-apis/bot/v2/hook/BOT_B","secret":"BOT_B_SECRET"}]
+```
+
+配置几个机器人就向几个目标推送。每项 secret 对应各自的签名密钥；省略时使用 `FEISHU_SECRET`，显式空字符串表示不签名。若启用关键词校验，配置 `FEISHU_KEYWORD`，关键词并入每张卡片的总标题，不在正文顶部单独显示提示行。机器人有 IP 白名单时，实际执行环境的出口 IP 需要符合其配置。空列表、无效地址和重复 Webhook 会在 doctor 中报错。
+
+多个机器人可放在同一渠道数组内，共用巡检任务的状态目录；需要不同路由时再定义多个通知渠道，使用不同变量名和状态目录。`send --channel CHANNEL_ID` 向该渠道的全部机器人发送。创建、修改配置不代表立即发送消息。
+
+飞书默认发送 `msg_type=interactive` 卡片。同一批次的所有云、服务、Topic 合并展示，每条日志保留来源，不按来源或单条事件拆开推送。每条“日志告警｜服务｜环境”标题独立加粗，日志之间使用分隔线；内部小节使用加粗标题和留白，不重复插入分隔线。卡片分区展示请求信息、关联与追踪、具体错误、简短分析和建议；正文沿用 `assets/notification.txt`，`render` 仍可生成本地文本预览。动态标题转义后加粗，日志正文和分析放入纯文本组件，授权统一脱敏。仅超过卡片字节数或组件容量时分段，保留中文字符，不静默截断；每张都带机器人关键词。
+
+各机器人独立确认成功，一个目标失败会继续尝试其他目标；整个批次的所有目标完成才确认事件。队列持久化每个事件的目标回执，重试跳过已完成目标。未完成目标如果有部分卡片已接收，重试仍可能重复该目标的片段。批量卡片之间留有发送间隔；多个并行任务共用机器人时，仍需统筹平台限流。其他 IM provider 需先实现渠道适配。
+
+## 固定字段
+
+消息包含：发生时间、日志来源、级别、事件标识、请求/追踪标识、请求人、脱敏授权、请求路径、模型、上游、服务/上游状态、关联方式/依据/完整性、具体错误、错误分析和建议。有 operation 时增加“操作类型”，例如 CreateAsset；网关 profile 将服务状态标为“网关”。
+
+- `event_id` 是本工具生成的日志指纹；`request_id` / `trace_id` 来自原始元数据，两者不能混用。
+- 级别非 INFO/DEBUG 并不等于请求最终失败。WARN/NOTICE 等记录可以发送，最终请求结果由追踪证据决定。
+- 没有某字段写“未记录”；服务 profile 中明确 `not_applicable` 的字段写“不适用”。
+- 原始错误与分析结论分别展示。推测不能写成已确认根因，时间接近不能写成标识匹配。
+- 不添加之前取消的路径过滤，也不添加“监控条件”说明行。
+
+## 分析输入
+
+Agent 可给 `render` / `send` 提供 `--analysis-file`，内容以真实 event_id 为键：
+
+```json
+{
+  "实际事件指纹": {
+    "certainty": "suspected",
+    "judgment": "根据上游错误判断参数可能无效，尚需核对对应资源",
+    "evidence": "事件指纹及错误字段，说明结论依据",
+    "recommendation": "核对请求参数与上游资源状态"
+  }
+}
+```
+
+certainty 使用 `confirmed`、`suspected`、`unknown`。脚本不调用 LLM，也不凭状态码生成确定根因；由宿主 Agent 阅读日志并填写分析。未提供分析时显示“暂无法确认原因”。
+
+卡片的“错误分析”只展示简短原因和处理建议，通常各一句。不要在这里加入联调过程、日志计数或长事件指纹；详细 `evidence` 留在本地分析文件中。推测仍标注“可能”，未确认的结论标注“待确认”。
+
+## 授权信息处理
+
+查询阶段允许 Agent 得到完整授权值。云访问凭据通过环境变量配置，请求 Header 内的授权值可用于精确检索。
+
+发布时统一脱敏，包括授权字段、错误原文、日志片段和分析引用。默认保留 Key 前 4 位和后 4 位，中间为八个星号；长度不超过 12 的值全部隐藏。`Bearer` / `Basic` 等认证类型保留。支持结构化和常见文本形式的 Authorization、X-API-Key、auth_key、api_key、license_key 等字段。
+
+`query` 输出是内部分析材料，可能含原文；`render` 输出才是可发送文本。`scan` 队列只保存脱敏诊断字段，补查完整授权时使用 query/trace。分析使用了额外原始日志时，把该 JSON 传给 `render` 或 `send` 的 `--secrets-input`，用于识别分析中可能再次出现的完整凭据。它不会被直接附加到消息。
+
+不因安装 skill 自动发测试消息。实际调用 send 的目标、内容和任务范围需要在用户的已有发送授权内。官方自定义机器人文档入口：https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot

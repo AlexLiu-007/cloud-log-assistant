@@ -1,0 +1,37 @@
+{
+  "parser": "generic",
+  "timezone": "+08:00",
+  "request_id_prefix": true,
+  "prefer_level_prefix": true,
+  "bracket_fields": false,
+  "json_payloads": [
+    {"logger": "service.seedance_asset_service:_log_response", "prefix": "seedance asset upstream response failed: ", "target": "upstream_result"},
+    {"logger": "service.seedance_asset_service:_log_request", "prefix": "seedance asset upstream request begin: ", "target": "upstream_request"},
+    {"logger": "api.middlewares.auth_middleware:dispatch", "prefix": "plugin api-key auth request header: ", "target": "request_headers"},
+    {"logger": "sdks.anspire.jdcloud_asset_auth_verify:process", "prefix": "asset-library api-key auth result: ", "target": "auth_result"},
+    {"logger": "utils.httpUtil:do_request", "prefix": "Request failed: ", "target": "http_failure"}
+  ],
+  "fields": {
+    "request_id": [],
+    "actor": ["auth_result.data.customer_id", "user_id", "customer_id", "user_name"],
+    "authorization": ["request_headers.Authorization", "request_headers.X-API-Key", "authorization", "auth_key", "api_key"],
+    "operation": ["upstream_result.action", "upstream_request.action", "operation"],
+    "upstream_status": ["upstream_result.response.status_code", "upstream_status"],
+    "upstream_provider": ["upstream_result.response.content.ResponseMetadata.Service", "upstream_provider"],
+    "error_code": ["upstream_result.response.content.ResponseMetadata.Error.Code", "upstream_result.response.content.error.code", "http_failure.code", "error_code"],
+    "error_type": ["upstream_result.response.content.ResponseMetadata.Error.Type", "upstream_result.response.content.error.type", "error_type"],
+    "error_message": ["upstream_result.response.content.ResponseMetadata.Error.Message", "upstream_result.response.content.error.message", "http_failure.msg", "http_failure.message", "error_message"]
+  },
+  "patterns": {
+    "path": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*api\\.middlewares\\.auth_middleware:dispatch:\\d+\\s*-\\s*(?:Request ID\\s*[:=]?\\s*\\[?[A-Za-z0-9._:-]+\\]?\\s*(?:-\\s*)?)?plugin api-key auth request url: https?://[^/\\s]+(?P<value>/[^\\s?#]*)[^\\s]*\\s*$",
+    "gateway_status": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*api\\.routes\\.asset_library:_call_seedance_asset_action:\\d+\\s*-\\s*(?:Request ID\\s*[:=]?\\s*\\[?[A-Za-z0-9._:-]+\\]?\\s*(?:-\\s*)?)?seedance asset action end, action=[A-Za-z0-9_]+, http_status=(?P<value>[1-5][0-9]{2})\\s*$",
+    "operation": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*api\\.routes\\.asset_library:_call_seedance_asset_action:\\d+\\s*-\\s*(?:Request ID\\s*[:=]?\\s*\\[?[A-Za-z0-9._:-]+\\]?\\s*(?:-\\s*)?)?seedance asset action (?:begin|end), action=(?P<value>[A-Za-z0-9_]+)(?:, http_status=[1-5][0-9]{2})?\\s*$"
+  },
+  "stage_patterns": {
+    "received": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*api\\.middlewares\\.auth_middleware:dispatch:\\d+\\s*-\\s*(?:Request ID\\s*[:=]?\\s*\\[?[A-Za-z0-9._:-]+\\]?\\s*(?:-\\s*)?)?plugin api-key auth begin\\s*$",
+    "completed": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*api\\.routes\\.asset_library:_call_seedance_asset_action:\\d+\\s*-\\s*(?:Request ID\\s*[:=]?\\s*\\[?[A-Za-z0-9._:-]+\\]?\\s*(?:-\\s*)?)?seedance asset action end, action=[A-Za-z0-9_]+, http_status=[1-5][0-9]{2}\\s*$",
+    "upstream": "^[^\\n|]*\\|\\s*[A-Za-z]+\\s*\\|\\s*service\\.seedance_asset_service:_log_(?:request|response):\\d+\\s*-"
+  },
+  "heuristic_window_seconds": 30,
+  "heuristic_fields": ["path", "actor", "operation"]
+}

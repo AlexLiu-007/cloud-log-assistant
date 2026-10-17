@@ -1,0 +1,10 @@
+{
+  "parser": "generic",
+  "timezone": "+00:00",
+  "fields": {},
+  "patterns": {},
+  "stage_patterns": {},
+  "heuristic_window_seconds": 30,
+  "heuristic_fields": ["path", "actor"],
+  "not_applicable": ["model", "upstream_provider", "upstream_model"]
+}

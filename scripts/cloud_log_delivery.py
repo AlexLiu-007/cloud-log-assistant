@@ -15,7 +15,8 @@ from urllib.request import Request, urlopen
 
 from cloud_log_common import LogError, digest, env_setting
 from cloud_log_reporting import redact_text, render
-from cloud_log_state import begin_send, confirm_target, pending_for_target, receipt, renew_send
+from cloud_log_state import (begin_send, confirm_target, load_authorization_fingerprints,
+                             pending_for_target, receipt, renew_send)
 
 
 SECTION_HEADINGS = {"【关联与追踪】", "【具体错误】", "【错误分析】", "【查询与追踪说明】"}
@@ -173,7 +174,14 @@ def send_document(config, channel_id, document, analyses, directory=None, secret
         source.get("error") or source.get("status") == "failed" or source.get("complete") is False
         for source in document.get("sources", []))
     if not records and not diagnostics:
-        return {"channel": channel_id, "sent_messages": 0, "reason": "no_findings"}
+        warnings = []
+        for source in document.get("sources", []):
+            label = " / ".join(str(source[key]) for key in ("provider", "connection_id", "resource")
+                               if source.get(key))
+            warnings.extend(redact_text((label + "：" if label else "") + str(warning), secrets)
+                            for warning in source.get("warnings", []))
+        return {"channel": channel_id, "sent_messages": 0, "reason": "no_findings",
+                "warnings_not_sent": list(dict.fromkeys(warnings))}
     targets, keyword, timeout = channel_settings(channel)
     secrets = set(secrets) | {t[key] for t in targets for key in ("webhook", "secret") if t[key]}
     keyword = redact_text(keyword, secrets)
@@ -196,7 +204,9 @@ def send_document(config, channel_id, document, analyses, directory=None, secret
             if delivery_id and not target_records:
                 results.append({"target": index, "status": "already_delivered", "sent_messages": 0})
                 continue
-            parts = cards(render(target_document, analyses, secrets), keyword)
+            fingerprints = (load_authorization_fingerprints(directory, [r["event_id"] for r in target_records])
+                            if delivery_id else {})
+            parts = cards(render(target_document, analyses, secrets, fingerprints), keyword)
             for part in parts:
                 if delivery_id:
                     renew_send(directory, delivery_id, len(records))

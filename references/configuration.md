@@ -32,6 +32,7 @@ plugin-api 使用 `assets/profiles/plugin-api.json`。设置 `VOLC_PLUGIN_LOG_TO
 - `profile` 和 `query_file` 相对路径以配置文件目录为基准。移动配置时同步调整引用，或使用绝对路径。
 - `content_fields` 可指定云返回行中正文所在的路径列表，默认依次识别 FullLog、LogMessage、__content__、message；其他数据格式结合服务 profile 适配。
 - `*_env` 指定环境变量名，可为每个连接使用不同前缀。例如第二套 Azure 使用 `AZURE_B_TENANT_ID` 等变量。
+- 输出脱敏会按环境变量配置字段名识别 `api_key_env`、`password_env`、`authorization_env` 等凭据。自定义适配器使用非标准字段名时，在配置根级 `redact_env` 中列出凭据环境变量名，例如 `"redact_env": ["CUSTOM_PROVIDER_CREDENTIAL"]`。
 - 云端凭据不放进 JSON/skill。 `.env.example` 只列空变量；本地 `.env` 通过 `--env-file` 明确加载，不搜索其他项目环境文件，不执行变量展开或 shell 代码。已有进程环境优先。
 - `window_seconds` 是未指定时间时的查询窗口；样例 300 秒。`output_timezone` 是报告时区，样例 `+08:00`。CLI 的绝对开始/结束时间必须含时区。
 - 默认查询及巡检只排除 INFO、DEBUG，不按状态码或路径排除。级别缺失保留。上下文查询 `--all-levels` 及 `trace` 包含所有级别。
@@ -59,7 +60,7 @@ PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output ru
 
 已有离线日志可用 `normalize --config ... --connection ... --input rows.json --output ...`。输入为原始行数组或 `{"rows": [...]}`。它不联网，且不能证明原始采集是否完整。
 
-查询输出包含 `sources`、`records`、`complete` 和时间范围。`records` 供 Agent 使用，可含完整授权及原文；公开消息使用 `render`/`send`。记录的 `event_id` 是来源和日志内容的稳定指纹，不是虚构的请求 ID。
+查询输出包含 `sources`、`records`、`complete` 和时间范围。`records` 供 Agent 使用，可含完整授权及原文；公开消息使用 `render`/`send`。`event_id` 优先基于云端事件/行 ID；没有来源 ID 时使用来源和原始行指纹，并为同一查询中的完全相同记录分配序号。它不是虚构的请求 ID。
 
 退出码：0 表示命令完成；2 表示输入/查询/投递失败；3 表示云查询得到不完整结果。批量查询/巡检即使退出码为 2 或 3，已成功获取的记录仍写入输出，应读取结果再处理。
 
@@ -67,11 +68,15 @@ PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output ru
 
 为每个巡检任务与通知渠道配置独立、固定的绝对 `CLOUD_LOG_STATE_DIR`；一个渠道内的多个机器人共用它。该目录不随客户端生成的临时工作树或聊天变化。CLI 也接受 `--state-dir`。
 
+不传 `--start`、`--end` 或 `--since` 的 `scan` 会在状态库中为每个连接保存查询起点：首次从配置的默认窗口开始；只有该连接的所有资源都成功且完整时才推进起点。失败或不完整时保留原起点，下次继续查同一段并覆盖停机期间的空档。若达到 `max_rows` / `max_pages`，起点会保持不动；提高上限后重跑即可继续。显式指定时间范围的 scan 不读取或推进自动起点。更改连接的日志筛选配置会建立新的起点范围；需要补查历史时仍应显式指定 `--start`。
+
 ```text
 PYTHON scripts/cloud_logs.py scan --config assets/connections.example.json --env-file .env --output runtime/scan.json
-PYTHON scripts/cloud_logs.py render --input runtime/scan.json --analysis-file runtime/analysis.json --output runtime/notification.txt
+PYTHON scripts/cloud_logs.py render --input runtime/scan.json --state-dir ABSOLUTE_STATE_DIR --analysis-file runtime/analysis.json --output runtime/notification.txt
 PYTHON scripts/cloud_logs.py send --config assets/connections.example.json --env-file .env --channel feishu-alerts --input runtime/scan.json --analysis-file runtime/analysis.json
 ```
+
+`render` 处理 `scan`/`claim` 输出时传入同一 `--state-dir`，以便从状态库读取授权 Key 的 HMAC 分组指纹并合并重复错误。直接渲染仍包含原始授权值的 query/normalize 结果时，无需该参数；通知只使用脱敏后的授权展示。
 
 `analysis-file` 可省略；没有分析时模板显示“暂无法确认原因”。Agent 补查原始记录后再分析；发布时用 `--secrets-input` 提供补查 JSON，可重复传入多个文件，使错误分析中的授权值也能统一遮挡。`render` 可同时传入 `--config`，识别自定义凭据环境变量。
 
@@ -79,15 +84,15 @@ PYTHON scripts/cloud_logs.py send --config assets/connections.example.json --env
 
 ```text
 PYTHON scripts/cloud_logs.py enrich --input runtime/scan.json --context runtime/trace-a.json --context runtime/trace-b.json --output runtime/enriched.json
-PYTHON scripts/cloud_logs.py render --config assets/connections.example.json --env-file .env --input runtime/enriched.json --analysis-file runtime/analysis.json --secrets-input runtime/trace-a.json --secrets-input runtime/trace-b.json --output runtime/notification.txt
+PYTHON scripts/cloud_logs.py render --config assets/connections.example.json --env-file .env --state-dir ABSOLUTE_STATE_DIR --input runtime/enriched.json --analysis-file runtime/analysis.json --secrets-input runtime/trace-a.json --secrets-input runtime/trace-b.json --output runtime/notification.txt
 PYTHON scripts/cloud_logs.py send --config assets/connections.example.json --env-file .env --channel feishu-alerts --input runtime/enriched.json --analysis-file runtime/analysis.json --secrets-input runtime/trace-a.json --secrets-input runtime/trace-b.json
 ```
 
 enrich 不联网，保留所有事件和 delivery_id。它仅以同一连接、同一资源内的 request_id/trace_id/correlation_id 匹配上下文；不覆盖已知字段，不补入冲突值，不根据业务 ID 或同一 Key 猜测。补全后的 scan 仍不含完整授权和原始日志。字段来源证据保留在本地 associations 中，卡片错误分析保持简短。
 
-`scan` 把符合级别规则的事件写入 SQLite 待发送队列，按事件指纹去重，然后领取一个批次。数据库保存已脱敏的诊断字段，不保存原始请求/响应。默认批次 100 条，可用 `--batch-size` 调整；默认租约 900 秒。历史未投递事件即使已离开当前查询窗口仍会重试。
+`scan` 把符合级别规则的事件写入 SQLite 待发送队列，按事件指纹去重，然后领取一个批次。数据库保存已脱敏的诊断字段和状态目录专用的授权 HMAC 分组指纹，不保存原始请求/响应或授权 Key 明文。默认批次 100 条，可用 `--batch-size` 调整；默认租约 900 秒。历史未投递事件即使已离开当前查询窗口仍会重试。
 
-`send` 合并同一批次的所有来源，向渠道配置的全部机器人发送。一个机器人失败会继续尝试其他机器人；队列为每个事件保存各目标的成功回执，重试跳过已完成的目标。全部目标成功才确认事件；失败释放租约。发送期间逐段续租，避免长批次租约过期后被重复领取。没有事件、没有来源异常时保持安静。单个机器人内部多段消息部分成功后的重试仍可能重复片段；Webhook 无法保证恰好一次投递。
+`send` 在同一批次中将同服务、模型、授权 Key、错误阶段和结果/状态一致的事件合并展示，并向渠道配置的全部机器人发送。来源、事件数和时间范围会显示在汇总中；合并不改变队列中的原始事件，也不把多条日志推断为同一请求。一个机器人失败会继续尝试其他机器人；队列为每个事件保存各目标的成功回执，重试跳过已完成的目标。全部目标成功才确认事件；失败释放租约。发送期间逐段续租，避免长批次租约过期后被重复领取。没有事件、没有来源异常时保持安静。单个机器人内部多段消息部分成功后的重试仍可能重复片段；Webhook 无法保证恰好一次投递。
 
 `pending_count` 包含已领取及未领取的待发事件，`available_count` 是还可领取的数量。成功发送当前批次后，继续处理可领取事件：
 
@@ -104,13 +109,21 @@ PYTHON scripts/cloud_logs.py ack --env-file .env --delivery-id DELIVERY_ID
 PYTHON scripts/cloud_logs.py release --env-file .env --delivery-id DELIVERY_ID
 ```
 
-预览不得 ack。每个批次只交给一个发送流程；发送器会检查租约和事件集合。状态目录绑定通知渠道，渠道中的多个机器人共用该目录；不同任务或渠道使用独立目录。渠道新增机器人作用于尚未最终确认的事件及后续事件，不回放已全部确认的历史消息。已发送指纹和目标回执不会自动删除，保留期按运维需求管理。
+预览不得 ack。每个批次只交给一个发送流程；发送器会检查租约和事件集合。状态目录绑定通知渠道，渠道中的多个机器人共用该目录；不同任务或渠道使用独立目录。渠道新增机器人作用于尚未最终确认的事件及后续事件，不回放已全部确认的历史消息。
+
+已确认事件和目标回执默认保留，避免在用户未设定期限时自动删除审计记录。按组织保留策略定期清理已确认的旧数据；该操作不会删除待发送或租约中的事件：
+
+```text
+PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-days 90
+```
+
+`purge` 至少要求保留 1 天；每个巡检/渠道状态目录分别执行。清理后再对旧时间范围做人工补查，可能重新入队并再次通知相同事件。
 
 ## 宿主调度说明
 
 定时任务由用户的 Agent 客户端或其他调度器创建，skill 不包含客户端专属调度文件。任务提示词明确：选哪些连接、查询窗口、运行频率、固定状态目录、飞书渠道、发送授权以及失败处理。宿主需能访问专属解释器、配置和环境变量。
 
-每轮执行 scan，读取成功和失败来源，必要时补查、enrich 并填写分析，调用 send，再用 claim 处理剩余队列。无新事件保持安静；失败或不完整结果不能视为健康。查询始终使用确定的最近窗口，不自动扩大窗口补采停机期间日志；如需补采，由用户指定范围。
+每轮执行 scan，读取成功和失败来源及 `checkpoint` 状态，必要时补查、enrich 并填写分析，调用 send，再用 claim 处理剩余队列。无新事件且无错误/不完整结果时保持安静；warning-only 且无事件时，`send` 不推送，但会在命令结果的 `warnings_not_sent` 中返回诊断。失败或不完整结果不能视为健康。自动 scan 从最近一个完整水位继续，显式时间范围不会改变该水位；如果自动范围一直不完整，应提高资源上限或手动拆分时间范围后补查。
 
 ## 本地验证
 

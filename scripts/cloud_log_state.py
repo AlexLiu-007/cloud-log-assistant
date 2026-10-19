@@ -1,14 +1,23 @@
 """Persistent notification outbox with leases and explicit delivery receipts."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import re
+import secrets
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cloud_log_common import LogError
 from cloud_log_reporting import public_record
+
+
+AUTH_SCHEME = re.compile(r"^(?:Bearer|Basic|Token|ApiKey)\s+", re.I)
+MASKED_AUTH = re.compile(r"(?:[^*]{4})?\*{8}(?:[^*]{4})?")
 
 
 def open_store(directory):
@@ -21,14 +30,60 @@ def open_store(directory):
     database.execute("""CREATE TABLE IF NOT EXISTS events (
         event_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, payload TEXT NOT NULL,
         created REAL NOT NULL, sent REAL, delivery_id TEXT, lease_until REAL,
-        sending INTEGER NOT NULL DEFAULT 0)""")
+        sending INTEGER NOT NULL DEFAULT 0, authorization_fingerprint TEXT)""")
+    event_columns = {row[1] for row in database.execute("PRAGMA table_info(events)")}
+    if "authorization_fingerprint" not in event_columns:
+        database.execute("ALTER TABLE events ADD COLUMN authorization_fingerprint TEXT")
     database.execute("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
     database.execute("""CREATE TABLE IF NOT EXISTS target_receipts (
         event_id TEXT NOT NULL, destination TEXT NOT NULL, sent REAL NOT NULL,
         PRIMARY KEY(event_id, destination))""")
+    database.execute("""CREATE TABLE IF NOT EXISTS scan_cursors (
+        connection_id TEXT NOT NULL, scope_hash TEXT NOT NULL, next_start REAL NOT NULL,
+        updated REAL NOT NULL, PRIMARY KEY(connection_id, scope_hash))""")
     database.execute("CREATE INDEX IF NOT EXISTS unsent_events ON events(sent, lease_until, created)")
     database.commit()
     return database
+
+
+def _authorization_value(value):
+    if not isinstance(value, (str, int)):
+        return None
+    value = str(value).strip()
+    value = AUTH_SCHEME.sub("", value, count=1).strip()
+    if not value or value.casefold() in {"未记录", "不适用", "[已隐藏]"} or MASKED_AUTH.fullmatch(value):
+        return None
+    return value
+
+
+def _authorization_fingerprint(database, value):
+    value = _authorization_value(value)
+    if value is None:
+        return None
+    key = secrets.token_hex(32)
+    database.execute("INSERT OR IGNORE INTO settings(name, value) VALUES ('authorization_hmac_key', ?)", (key,))
+    key = database.execute("SELECT value FROM settings WHERE name='authorization_hmac_key'").fetchone()[0]
+    return hmac.new(bytes.fromhex(key), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def load_authorization_fingerprints(directory, event_ids):
+    """Return state-scoped authorization fingerprints without exposing credential values."""
+    event_ids = list(dict.fromkeys(event_ids))
+    if not event_ids:
+        return {}
+    database = open_store(directory)
+    try:
+        result = {}
+        for offset in range(0, len(event_ids), 500):
+            batch = event_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = database.execute(
+                f"SELECT event_id, authorization_fingerprint FROM events "
+                f"WHERE event_id IN ({placeholders}) AND authorization_fingerprint IS NOT NULL", batch)
+            result.update(rows.fetchall())
+        return result
+    finally:
+        database.close()
 
 
 def enqueue_and_claim(directory, records, connection_ids, lease_seconds=900, batch_size=100, extra_secrets=()):
@@ -41,8 +96,16 @@ def enqueue_and_claim(directory, records, connection_ids, lease_seconds=900, bat
             database.execute("BEGIN IMMEDIATE")
             for record in records:
                 safe = public_record(record, extra_secrets)
-                database.execute("INSERT OR IGNORE INTO events(event_id, connection_id, payload, created) VALUES (?, ?, ?, ?)",
-                                 (record["event_id"], record["connection_id"], json.dumps(safe, ensure_ascii=False), now))
+                fingerprint = _authorization_fingerprint(database, record.get("authorization"))
+                database.execute(
+                    "INSERT OR IGNORE INTO events(event_id, connection_id, payload, created, authorization_fingerprint) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (record["event_id"], record["connection_id"], json.dumps(safe, ensure_ascii=False), now,
+                     fingerprint))
+                if fingerprint:
+                    database.execute(
+                        "UPDATE events SET authorization_fingerprint=COALESCE(authorization_fingerprint, ?) "
+                        "WHERE event_id=?", (fingerprint, record["event_id"]))
             placeholders = ",".join("?" for _ in connection_ids)
             rows = database.execute(
                 f"SELECT event_id, payload FROM events WHERE sent IS NULL AND (lease_until IS NULL OR lease_until < ?) "
@@ -59,6 +122,69 @@ def enqueue_and_claim(directory, records, connection_ids, lease_seconds=900, bat
         return {"delivery_id": delivery_id if rows else None, "lease_seconds": lease_seconds,
                 "alerts": [json.loads(payload) for _, payload in rows], "pending_count": pending,
                 "available_count": available}
+    finally:
+        database.close()
+
+
+def load_scan_cursors(directory, scopes, initial_start):
+    """Create stable per-source checkpoints and return their next query starts."""
+    database = open_store(directory)
+    now, initial = time.time(), initial_start.timestamp()
+    try:
+        with database:
+            for connection_id, scope_hash in scopes.items():
+                database.execute("DELETE FROM scan_cursors WHERE connection_id=? AND scope_hash<>?",
+                                 (connection_id, scope_hash))
+                database.execute(
+                    "INSERT OR IGNORE INTO scan_cursors(connection_id, scope_hash, next_start, updated) VALUES (?, ?, ?, ?)",
+                    (connection_id, scope_hash, initial, now))
+            rows = {connection_id: database.execute(
+                "SELECT next_start FROM scan_cursors WHERE connection_id=? AND scope_hash=?",
+                (connection_id, scope_hash)).fetchone()[0]
+                    for connection_id, scope_hash in scopes.items()}
+        return {connection_id: datetime.fromtimestamp(next_start, timezone.utc)
+                for connection_id, next_start in rows.items()}
+    finally:
+        database.close()
+
+
+def advance_scan_cursors(directory, scopes, end):
+    """Advance only sources whose whole interval completed successfully."""
+    if not scopes:
+        return 0
+    database = open_store(directory)
+    now, target = time.time(), end.timestamp()
+    try:
+        with database:
+            updated = 0
+            for connection_id, scope_hash in scopes.items():
+                cursor = database.execute(
+                    "UPDATE scan_cursors SET next_start=MAX(next_start, ?), updated=? "
+                    "WHERE connection_id=? AND scope_hash=?",
+                    (target, now, connection_id, scope_hash))
+                updated += cursor.rowcount
+        return updated
+    finally:
+        database.close()
+
+
+def purge_sent(directory, retention_days):
+    """Remove only acknowledged events older than the explicitly chosen retention."""
+    if type(retention_days) is not int or retention_days < 1:
+        raise LogError("retention-days 必须是至少 1 天的整数")
+    database = open_store(directory)
+    cutoff = time.time() - retention_days * 86400
+    try:
+        with database:
+            database.execute(
+                "DELETE FROM target_receipts WHERE event_id IN "
+                "(SELECT event_id FROM events WHERE sent IS NOT NULL AND sent < ?)", (cutoff,))
+            receipts = database.execute("SELECT changes()").fetchone()[0]
+            events = database.execute(
+                "DELETE FROM events WHERE sent IS NOT NULL AND sent < ?", (cutoff,)).rowcount
+        return {"purged_events": events, "purged_target_receipts": receipts,
+                "retention_days": retention_days,
+                "cutoff": datetime.fromtimestamp(cutoff, timezone.utc).isoformat()}
     finally:
         database.close()
 

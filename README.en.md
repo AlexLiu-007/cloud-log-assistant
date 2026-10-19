@@ -9,6 +9,7 @@ An agent skill for querying and analyzing logs across cloud platforms. It can qu
 - Query multiple cloud platforms, accounts, regions, and services while preserving each log record's source.
 - Parse service-specific log formats, correlate requests and tasks, and enrich events with evidence and uncertainty clearly identified.
 - Store scan events in a local persistent queue and send consolidated alerts through Feishu custom bots.
+- Group matching errors for the same service, model, and authorization key in notifications while retaining each source event and delivery receipt separately.
 - Read credentials from environment variables and mask authorization keys in notification output.
 - Extend the skill with additional cloud log providers and service log formats.
 
@@ -56,3 +57,5 @@ Replace `PYTHON` with the interpreter in this virtual environment: `./.venv/Scri
 Do not commit real credentials. `.env`, virtual environments, and query results, state databases, and previews under `runtime/` are excluded by `.gitignore`. Query results may contain raw logs and complete authorization fields; keep them local for analysis and use the redacted output from `render` or `send` for external notifications.
 
 Scheduled scans are managed by the host agent or another scheduler. This skill does not create scheduled tasks or poll continuously on its own.
+
+When `scan` runs without explicit time arguments, it stores a completion checkpoint in the state directory and retries failed or truncated intervals on the next run. Acknowledged queue records are retained by default. To apply your retention policy, run `PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-days 90`.

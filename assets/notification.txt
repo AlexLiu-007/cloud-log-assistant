@@ -1,7 +1,7 @@
 日志告警｜${service}｜${environment}
 
-发生时间：${timestamp}
-日志来源：${provider} / ${connection_id} / ${resource}
+${group_summary_line}发生时间：${timestamp}
+日志来源：${source_summary}
 日志级别：${level}
 事件标识：${event_id}
 请求标识：${request_identity}

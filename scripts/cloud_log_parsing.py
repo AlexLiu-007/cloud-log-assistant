@@ -44,9 +44,15 @@ SECRET_NAMES = {"authorization", "proxy_authorization", "auth_key", "api_key", "
                 "password", "secret", "cookie", "set_cookie", "authkey", "xapikey",
                 "clientsecret", "accesstoken", "refreshtoken", "secretkey", "accesskey",
                 "accesskeyid", "accesskeysecret", "proxyauthorization", "session_token",
-                "webhook", "webhook_url", "webhookurl", "license_key", "licensekey"}
+                "webhook", "webhook_url", "webhookurl", "license_key", "licensekey",
+                "credential", "credentials", "private_key", "privatekey", "signing_key",
+                "signingkey", "signing_secret", "signingsecret", "secret_access_key", "secretaccesskey",
+                "api_secret", "apisecret", "client_certificate", "clientcertificate",
+                "id_token", "idtoken", "jwt"}
 BODY_NAMES = {"headers", "request_body", "response_body", "body", "messages", "prompt",
               "request", "response", "input", "output", "content", "payload"}
+SOURCE_ID_FIELDS = ("event_id", "EventId", "log_id", "LogId", "row_id", "RowId",
+                    "record_id", "RecordId", "_id", "__id__")
 
 
 def key_name(value):
@@ -278,7 +284,11 @@ def normalize(row, connection, profile, resource=""):
         warnings.append("未记录时间字段")
     if not result["level"]:
         warnings.append("未记录日志级别，保留该记录")
-    result.update(event_id=digest([connection["id"], connection["provider"], resource, row]),
+    source_id = next((lookup(row, path) for path in SOURCE_ID_FIELDS
+                      if lookup(row, path) not in MISSING and
+                      not isinstance(lookup(row, path), (dict, list))), None)
+    identity = ["source_id", str(source_id)] if source_id is not None else ["row", row]
+    result.update(event_id=digest([connection["id"], connection["provider"], resource, identity]),
                   connection_id=connection["id"], provider=connection["provider"], resource=resource,
                   service=connection.get("service", ""), environment=connection.get("environment", ""),
                   not_applicable=profile.get("not_applicable", []), raw=row, parse_warnings=warnings,

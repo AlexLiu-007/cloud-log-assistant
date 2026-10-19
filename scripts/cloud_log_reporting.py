@@ -139,7 +139,7 @@ def public_record(record, extra_secrets=()):
     return redact({key: value for key, value in record.items() if key != "raw"}, secrets)
 
 
-def render(document, analyses=None, extra_secrets=()):
+def _render_records(document, analyses=None, extra_secrets=()):
     analyses = analyses or {}
     records = document.get("alerts", document.get("records", []))
     default_association = document.get("association", {})
@@ -160,15 +160,27 @@ def render(document, analyses=None, extra_secrets=()):
                       "actor", "authorization", "method", "path", "model", "upstream_provider", "upstream_model",
                       "upstream_channel", "gateway_status", "upstream_status", "error_code", "error_type"):
             values.setdefault(field, "不适用" if field in excluded else "未记录")
-        values["timestamp"] = (parse_time(record["timestamp"]).astimezone(zone(timezone)).isoformat()
-                               if record.get("timestamp") else "未记录")
-        values["request_identity"] = " / ".join(f"{key}={record[key]}" for key in
-                                               ("request_id", "trace_id", "correlation_id") if record.get(key)) or "未记录"
+        values["source_summary"] = record.get("_notification_source_summary") or " / ".join(
+            str(record[key]) for key in ("provider", "connection_id", "resource") if record.get(key)) or "未记录"
+        values["group_summary_line"] = record.get("_notification_group_summary", "")
+        values["timestamp"] = (record.get("_notification_time_label") if record.get("_notification_grouped") else
+                               (parse_time(record["timestamp"]).astimezone(zone(timezone)).isoformat()
+                                if record.get("timestamp") else "未记录"))
+        values["request_identity"] = (record.get("_notification_request_label") if record.get("_notification_grouped") else
+                                     (" / ".join(f"{key}={record[key]}" for key in
+                                                 ("request_id", "trace_id", "correlation_id") if record.get(key)) or "未记录"))
+        if record.get("_notification_grouped"):
+            values["event_id"] = record["_notification_event_label"]
         values["authorization"] = mask(values["authorization"])
         values["operation_line"] = "操作类型：" + str(record["operation"]) + "\n" if record.get("operation") else ""
         values["response_label"] = record.get("response_label") or "服务"
         values["error_message"] = record.get("error_message") or ("未记录" if record.get("error_code") else record.get("message")) or "未记录"
-        if association:
+        if record.get("_notification_grouped"):
+            values["association_mode"] = "多条事件合并展示"
+            values["association_evidence"] = "按相同服务、模型、授权 Key 和错误分组；不据此认定为同一请求"
+            values["completeness"] = "每条请求链路完整性分别判断；此分组不提供链路证明"
+            values["outcome"] = "各事件结果分别保留；分组不推断统一结果"
+        elif association:
             values["association_mode"] = mode_labels.get(association.get("mode"), "未确认")
             values["association_evidence"] = "；".join(association.get("evidence", [])) or "证据不足"
             values["completeness"] = ("已观察到入口和结束，限已采集日志" if association.get("completeness") == "observed_boundaries"
@@ -205,3 +217,129 @@ def render(document, analyses=None, extra_secrets=()):
     if not sections:
         sections.append("本次查询未获得符合条件的日志；范围及完整性以查询结果为准。")
     return redact_text("\n\n---\n\n".join(sections) + "\n", secrets)
+
+
+def _group_text(value):
+    normalized = str(value).strip() if value not in (None, "") else ""
+    return "" if normalized.casefold() in {"未记录", "不适用", "unknown", "none", "null", "n/a", "-"} else normalized
+
+
+def _group_error_text(value):
+    return " ".join(_group_text(value).split()).casefold()
+
+
+def _group_auth(value, fingerprints, event_id):
+    fingerprint = fingerprints.get(event_id)
+    if fingerprint:
+        return "state-hmac", fingerprint
+    if not isinstance(value, (str, int)):
+        return None
+    value = str(value).strip()
+    value = re.sub(r"^(?:Bearer|Basic|Token|ApiKey)\s+", "", value, count=1, flags=re.I).strip()
+    if (not value or value.casefold() in {"未记录", "不适用", "[已隐藏]"} or
+            re.fullmatch(r"(?:[^*]{4})?\*{8}(?:[^*]{4})?", value)):
+        return None
+    return "raw", value
+
+
+def _group_key(record, association, analysis, fingerprints):
+    model = _group_text(record.get("model"))
+    authorization = _group_auth(record.get("authorization"), fingerprints, record.get("event_id"))
+    error = (_group_error_text(record.get("error_code")), _group_error_text(record.get("error_type")),
+             _group_error_text(record.get("error_message") or record.get("message")))
+    if not model or not authorization or not any(error):
+        return None
+    association, analysis = association or {}, analysis or {}
+    return (
+        _group_text(record.get("provider")), _group_text(record.get("service")),
+        _group_text(record.get("environment")), model, authorization, error,
+        _group_text(record.get("stage")), _group_text(record.get("event_type")),
+        _group_text(association.get("outcome", record.get("outcome", ""))),
+        _group_text(association.get("completeness")), _group_text(record.get("gateway_status")),
+        _group_text(record.get("upstream_status")), _group_text(record.get("response_label")),
+        _group_text(analysis.get("certainty")), _group_text(analysis.get("judgment")),
+        _group_text(analysis.get("recommendation")),
+    )
+
+
+def _distinct(records, field):
+    return list(dict.fromkeys(str(record[field]) for record in records
+                              if record.get(field) not in (None, "")))
+
+
+def _time_range(records, timezone):
+    times = []
+    for record in records:
+        if record.get("timestamp"):
+            try:
+                times.append(parse_time(record["timestamp"]).astimezone(zone(timezone)))
+            except Exception:
+                continue
+    if not times:
+        return "未记录"
+    times.sort()
+    first, last = times[0].isoformat(), times[-1].isoformat()
+    return first if first == last else first + " 至 " + last
+
+
+def render(document, analyses=None, extra_secrets=(), group_fingerprints=None):
+    """Merge equivalent alert presentation while leaving source events untouched."""
+    analyses = analyses or {}
+    group_fingerprints = group_fingerprints or {}
+    field = "alerts" if "alerts" in document else "records"
+    records = document.get(field, [])
+    if not records:
+        return _render_records(document, analyses, extra_secrets)
+    associations = {event_id: group for group in document.get("associations", [])
+                    for event_id in group.get("event_ids", [])}
+    default_association = document.get("association", {})
+    groups, positions = [], {}
+    for record in records:
+        association = associations.get(record.get("event_id"), default_association)
+        analysis = analyses.get(record.get("event_id"), {})
+        key = _group_key(record, association, analysis, group_fingerprints)
+        if key is None:
+            groups.append([record])
+        elif key in positions:
+            groups[positions[key]].append(record)
+        else:
+            positions[key] = len(groups)
+            groups.append([record])
+
+    if not any(len(group) > 1 for group in groups):
+        return _render_records(document, analyses, extra_secrets)
+
+    extra_secrets = set(extra_secrets) | collect_secrets(document) | collect_secrets(analyses)
+    rendered_records, grouped_associations = [], []
+    timezone = document.get("output_timezone", "+00:00")
+    for group in groups:
+        record = dict(group[0])
+        if len(group) > 1:
+            count = len(group)
+            source_labels = list(dict.fromkeys(
+                " / ".join(str(item[key]) for key in ("provider", "connection_id", "resource") if item.get(key))
+                for item in group))
+            record.update(
+                _notification_grouped=True,
+                _notification_group_summary=(f"合并展示：{count} 条独立事件；时间范围：{_time_range(group, timezone)}；"
+                                             f"涉及来源：{len(source_labels)} 个\n"),
+                _notification_source_summary="；".join(source_labels) or "未记录",
+                _notification_time_label=f"多次（{count} 条事件，见合并摘要）",
+                _notification_request_label=f"{count} 条事件的请求标识分别保留；合并不代表同一请求",
+                _notification_event_label=f"{count} 条独立事件（各 event_id 与回执逐条保留）",
+            )
+            for name in ("level", "actor", "method", "path", "operation", "upstream_provider",
+                         "upstream_model", "upstream_channel"):
+                values = _distinct(group, name)
+                if len(values) > 1:
+                    record[name] = "多个：" + "；".join(values)
+            grouped_associations.append({
+                "event_ids": [record["event_id"]], "mode": "context", "evidence": [],
+                "completeness": "not_confirmed", "outcome": "unknown",
+            })
+        rendered_records.append(record)
+
+    rendered_document = dict(document)
+    rendered_document[field] = rendered_records
+    rendered_document["associations"] = list(document.get("associations", [])) + grouped_associations
+    return _render_records(rendered_document, analyses, extra_secrets)

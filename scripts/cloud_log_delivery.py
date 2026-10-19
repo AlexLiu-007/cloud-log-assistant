@@ -19,7 +19,7 @@ from cloud_log_state import (begin_send, confirm_target, load_authorization_fing
                              pending_for_target, receipt, renew_send)
 
 
-SECTION_HEADINGS = {"【关联与追踪】", "【具体错误】", "【错误分析】", "【查询与追踪说明】"}
+SECTION_HEADINGS = {"【具体错误】", "【错误分析】", "【查询与追踪说明】"}
 
 
 def channel_settings(channel):

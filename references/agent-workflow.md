@@ -96,7 +96,7 @@ PYTHON scripts/cloud_logs.py enrich --input runtime/scan.json --context runtime/
 
 始终保留原 scan/claim 的 `delivery_id` 与完整事件集合；不要把某个 trace 结果替换成整个投递批次。`enrich` 只生成新 JSON，不把补全结果写回队列。按 `task_id` 保存结果可供重新 claim 后复用；复用时核对实际配置、来源、标识、时间和采集新鲜度，新批次重新 enrich，不能复用旧租约。
 
-`render` 允许生成标有“初步预览”的待追踪报告。`send` 会重新规划并拒绝未执行的追踪任务；查询已尝试却失败、为空、被截断或定位信息不足的事件可发送注明局限的报告。若用宿主其他工具发送，也应遵守相同顺序。预览不 ack；发送或确认仅按已有授权执行。
+`render` 允许在本地预览待追踪报告。卡片不显示追踪状态区块，须从 JSON 的 investigation 判断是否完成；`send` 会重新规划并拒绝未执行的追踪任务。查询已尝试却失败、为空、被截断或定位信息不足的事件可发送注明局限的报告。若用宿主其他工具发送，也应遵守相同顺序。预览不 ack；发送或确认仅按已有授权执行。
 
 ## Dify Agent 提示词
 

@@ -94,7 +94,8 @@ class AgentWorkflowTests(unittest.TestCase):
         self.assertIn('错误信息：未记录', text)
         self.assertNotIn('[REQUEST_COMPLETED]', text)
         self.assertNotIn('合并展示：', text)
-        self.assertIn('请求结果：失败', text)
+        self.assertNotIn('请求结果：', text)
+        self.assertEqual(row['outcome'], 'failed')
 
     def test_send_cannot_skip_pending_trace_before_network_or_queue_mutation(self):
         document, _ = sample()

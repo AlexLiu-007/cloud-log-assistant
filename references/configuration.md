@@ -1,26 +1,33 @@
 # 配置与命令
 
-## 独立 Python 环境（必须）
+## 使用宿主 Python，无需安装依赖
 
-Python 版本至少 3.10。安装任何依赖前，为本 skill 创建独立虚拟环境，默认位置是 skill 目录下的 `.venv`。禁止使用系统/global pip，也不复用其他项目的虚拟环境。已存在环境时确认它属于本 skill，再使用其解释器。
+Python 版本至少 3.10。Azure、火山 TLS、飞书、解析与队列均只使用 Python 标准库。直接使用宿主提供的解释器，不创建或激活虚拟环境，不运行 pip，不安装 SDK。已有虚拟环境也能使用，但不作为运行条件。
 
 Windows PowerShell，在 skill 目录执行：
 
 ```powershell
-py -3 -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r scripts/requirements.txt
-./.venv/Scripts/python.exe scripts/cloud_logs.py doctor --config assets/connections.example.json --env-file .env
+py -3 --version
+py -3 scripts/cloud_logs.py doctor --config assets/connections.example.json --env-file .env
 ```
 
 macOS / Linux：
 
 ```sh
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r scripts/requirements.txt
-./.venv/bin/python scripts/cloud_logs.py doctor --config assets/connections.example.json --env-file .env
+python3 --version
+python3 scripts/cloud_logs.py doctor --config assets/connections.example.json --env-file .env
 ```
 
-无需激活环境；始终写解释器完整路径。下文 `PYTHON` 表示这个专属解释器，不是一个要求用户设置的变量。Azure、飞书和本地处理使用标准库；火山需要 requirements 中的 SDK。只有授权执行依赖安装时才安装，不因阅读 skill 自动修改运行环境。
+下文 `PYTHON` 表示已经确认可用的 Python 3.10+ 解释器或启动命令，不是要求设置的环境变量。Dify 中优先使用工具明确提供的执行入口和解释器，不能假设存在某台用户电脑上的 `.venv` 路径。
+
+### Dify 的执行步骤
+
+1. 确认实际工具能读取上传的 Skill 文件并执行 Python 脚本。工具提供 Python 调用入口时直接使用；只有提供 Shell 时才运行上述命令。不要猜测未提供的工具名称。
+2. 使用现有解释器运行 `doctor`，检查连接与凭据。`virtual_environment=false` 是正常信息；仅看最终 ready 及具体缺失项，不将其当成虚拟环境异常。doctor 不联网验证权限。
+3. 从管理员配置的执行环境读取凭据，输出文件放在宿主允许的可写目录。单次 query/trace/enrich 不需要持久队列；scan/claim/send 的队列流程需要固定、可写的持久状态目录。
+4. 解释器、文件访问或云端网络不可用时，报告实际缺少的能力。不要循环创建 venv、尝试 pip 安装或切换系统路径。仅能执行孤立代码片段、无法访问 Skill 文件的节点，不能直接当作这个文件型 Skill 的完整执行器。
+
+分发 ZIP 不携带依赖安装清单。旧版安装包若仍提示安装 volcengine，应更新实际挂载的 Skill 包和已有任务中缓存的安装指令。
 
 ## 连接配置
 
@@ -56,7 +63,7 @@ PYTHON scripts/cloud_logs.py correlate --input runtime/query.json --anchor EVENT
 PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output runtime/notification.txt
 ```
 
-不传 `--connection` 时查询所有启用连接；重复传入该参数可选任意多个连接。每个连接/Topic 独立认证、查询与报告异常，最多四个资源查询并发。`doctor` 检查变量、profile、依赖和机器人配置；配置可用返回 ready=true 和退出码 0，缺失或无效返回 ready=false 和退出码 2。它不验证云端连通性，不显示密钥值。
+不传 `--connection` 时查询所有启用连接；重复传入该参数可选任意多个连接。每个连接/Topic 独立认证、查询与报告异常，最多四个资源查询并发。`doctor` 检查 Python 版本、变量、profile 和机器人配置；配置可用返回 ready=true 和退出码 0，缺失或无效返回 ready=false 和退出码 2。它不要求虚拟环境，不验证云端连通性，不显示密钥值。
 
 检索 Key 时可以使用临时环境变量 `REQUEST_AUTH_KEY`，避免命令行直接包含 Key；结果按日志记录返回，不把同一 Key 的所有请求合并。`trace` 先检索，再按解析后的指定字段复核，默认对每个连接分别建立关联。
 
@@ -129,10 +136,10 @@ PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-da
 
 ## 宿主调度说明
 
-定时任务由用户的 Agent 客户端或其他调度器创建，skill 不包含客户端专属调度文件。任务提示词明确：选哪些连接、查询窗口、运行频率、固定状态目录、飞书渠道、发送授权以及失败处理。宿主需能访问专属解释器、配置和环境变量。
+定时任务由用户的 Agent 客户端或其他调度器创建，skill 不包含客户端专属调度文件。任务提示词明确：选哪些连接、查询窗口、运行频率、固定状态目录、飞书渠道、发送授权以及失败处理。宿主需能访问现有 Python 解释器、配置和环境变量。
 
 每轮执行 scan，读取成功和失败来源及 `checkpoint` 状态，完成 investigation 的追踪任务、enrich 并填写分析，调用 send，再用 claim 处理剩余队列。无新事件且无错误/不完整结果时保持安静；warning-only 且无事件时，`send` 不推送，但会在命令结果的 `warnings_not_sent` 中返回诊断。失败或不完整结果不能视为健康。自动 scan 从最近一个完整水位继续，显式时间范围不会改变该水位；如果自动范围一直不完整，应提高资源上限或手动拆分时间范围后补查。
 
 ## 本地验证
 
-在仓库的 skill 专属环境执行 `PYTHON -m unittest discover -s scripts/tests -v`（分发 ZIP 不包含 tests）。测试使用虚构凭据和模拟接口，不发送真实消息。新增服务先用真实样本执行 normalize，确认级别、时间、标识和错误字段，再验证实际只读查询；通知目标需在已有授权范围内。Windows 建议使用 `python.exe -X utf8` 运行外部检查工具，避免中文文件被系统默认编码误读。
+在仓库用 Python 3.10+ 执行 `PYTHON -m unittest discover -s scripts/tests -v`（分发 ZIP 不包含 tests）。可加 `-S` 禁止加载第三方 site-packages，验证免依赖运行。测试使用虚构凭据和模拟接口，不发送真实消息。新增服务先用样本执行 normalize，再按授权验证只读查询；通知目标需在已有授权范围内。Windows 建议加 `-X utf8`，避免中文被系统默认编码误读。

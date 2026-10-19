@@ -14,7 +14,7 @@ PACKAGE_FILES = (
     "scripts/cloud_logs.py", "scripts/cloud_log_common.py", "scripts/cloud_log_parsing.py",
     "scripts/cloud_log_correlation.py", "scripts/cloud_log_enrichment.py", "scripts/cloud_log_workflow.py",
     "scripts/cloud_log_reporting.py", "scripts/cloud_log_state.py", "scripts/cloud_log_delivery.py",
-    "scripts/package_skill.py", "scripts/requirements.txt",
+    "scripts/package_skill.py",
     "scripts/providers/__init__.py", "scripts/providers/azure_log_analytics.py", "scripts/providers/volcengine_tls.py",
     "references/agent-workflow.md", "references/configuration.md", "references/correlation.md",
     "references/notifications.md", "references/extending.md", "references/azure.md",

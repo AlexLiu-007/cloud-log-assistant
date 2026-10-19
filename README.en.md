@@ -18,13 +18,12 @@ The model runs in the host agent. Scripts produce executable follow-up tasks; th
 
 ## Quick start
 
-Python 3.10 or later is required. From the repository root, create a dedicated virtual environment and copy the example configuration:
+Use Python 3.10 or later provided by the host. All built-in capabilities use the standard library; no virtual environment, pip installation, or SDK is required. From the repository root, check Python and copy the example configuration:
 
 Windows PowerShell:
 
 ```powershell
-py -3 -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r scripts/requirements.txt
+py -3 --version
 Copy-Item .env.example .env
 Copy-Item assets/connections.example.json assets/connections.json
 ```
@@ -32,8 +31,7 @@ Copy-Item assets/connections.example.json assets/connections.json
 macOS / Linux:
 
 ```sh
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r scripts/requirements.txt
+python3 --version
 cp .env.example .env
 cp assets/connections.example.json assets/connections.json
 ```
@@ -45,7 +43,7 @@ PYTHON scripts/cloud_logs.py doctor --config assets/connections.json --env-file 
 PYTHON scripts/cloud_logs.py query --config assets/connections.json --env-file .env --since 5m --output runtime/query.json
 ```
 
-Replace `PYTHON` with the interpreter in this virtual environment: `./.venv/Scripts/python.exe` on Windows or `./.venv/bin/python` on macOS / Linux. Cloud queries require valid connection settings and credentials. `doctor` checks local configuration and dependencies; it does not test cloud connectivity.
+Replace `PYTHON` with an available interpreter or launcher, such as `py -3` on Windows, `python3` on macOS / Linux, or the interpreter exposed by your Dify executor. Cloud queries require valid settings and credentials. `doctor` checks local configuration, not cloud connectivity. `virtual_environment=false` is informational and does not prevent readiness.
 
 ## Agent workflow
 
@@ -61,7 +59,9 @@ PYTHON scripts/package_skill.py
 
 This generates `dist/dify/cloud-log-assistant.zip` with SKILL.md at its root. If your Dify interface offers Skill ZIP import, upload the file and enable the skill for the agent. Use the prompt at the end of the workflow reference. The artifact is an Agent Skill ZIP.
 
-The executor needs file access, Python script execution, access to cloud log endpoints, injected credentials, and persistent storage for state. Uploading the ZIP does not configure these capabilities. Packaging uses an explicit file allowlist and excludes private configuration, real credentials, virtual environments, tests, and runtime data. Verify Dify import and cloud connectivity in your deployment.
+In Dify, use the existing Python execution tool directly. Do not create or activate a virtual environment or run pip. The ZIP contains no dependency installation manifest; Volcengine TLS now uses HTTPS requests signed with the standard library.
+
+The executor needs access to Skill files, Python 3.10+ script execution, cloud log endpoints, and injected credentials. Queue workflows also need persistent state storage. Uploading the ZIP does not grant these permissions. Packaging excludes private configuration, real credentials, virtual environments, tests, and runtime data. Report missing execution capabilities instead of repeatedly attempting installation. Verify Dify import and cloud connectivity in your deployment.
 
 ## Documentation
 

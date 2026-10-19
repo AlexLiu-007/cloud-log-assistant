@@ -18,13 +18,12 @@
 
 ## 快速开始
 
-需要 Python 3.10 或更新版本。在仓库根目录创建独立虚拟环境，并复制配置样例：
+需要宿主提供 Python 3.10 或更新版本。全部内置能力只用标准库，无需虚拟环境、pip 或 SDK。在仓库根目录确认 Python 可用，并复制配置样例：
 
 Windows PowerShell：
 
 ```powershell
-py -3 -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r scripts/requirements.txt
+py -3 --version
 Copy-Item .env.example .env
 Copy-Item assets/connections.example.json assets/connections.json
 ```
@@ -32,8 +31,7 @@ Copy-Item assets/connections.example.json assets/connections.json
 macOS / Linux：
 
 ```sh
-python3 -m venv .venv
-./.venv/bin/python -m pip install -r scripts/requirements.txt
+python3 --version
 cp .env.example .env
 cp assets/connections.example.json assets/connections.json
 ```
@@ -45,7 +43,7 @@ PYTHON scripts/cloud_logs.py doctor --config assets/connections.json --env-file 
 PYTHON scripts/cloud_logs.py query --config assets/connections.json --env-file .env --since 5m --output runtime/query.json
 ```
 
-将 `PYTHON` 替换为本虚拟环境的解释器路径：Windows 使用 `./.venv/Scripts/python.exe`，macOS / Linux 使用 `./.venv/bin/python`。查询云端需要有效的连接配置和凭据；`doctor` 检查本地配置与依赖，不验证云端连通性。
+将 `PYTHON` 替换为已确认可用的解释器或启动命令，例如 Windows 的 `py -3`、macOS / Linux 的 `python3`，或 Dify 执行器提供的路径。查询云端需要有效配置和凭据；`doctor` 检查本地配置，不验证云端连通性。`virtual_environment=false` 是正常信息，不影响 ready。
 
 ## Agent 运行流程
 
@@ -61,7 +59,9 @@ PYTHON scripts/package_skill.py
 
 生成 `dist/dify/cloud-log-assistant.zip`，ZIP 根目录包含 SKILL.md。若你的 Dify 页面提供 Skill ZIP 导入入口，可上传此文件并为 Agent 启用该 Skill；使用流程文档末尾的提示词。这里分发的是 Agent Skill ZIP。
 
-实际执行环境需要文件读取、Python 脚本执行、云日志网络访问、凭据注入和持久状态目录。上传 ZIP 不会自动配置这些能力。包使用明确文件清单，排除私有配置、真实凭据、虚拟环境、测试与运行数据。Dify 实际导入和云端联通需在部署环境中验证。
+在 Dify 中直接使用现有 Python 执行工具，不创建/激活 `.venv`，不运行 pip。包不包含依赖安装清单；火山 TLS 已改为标准库 HTTPS 签名请求。
+
+执行环境需要 Skill 文件访问、Python 3.10+ 脚本执行、云日志网络和凭据注入；队列巡检另需持久状态目录。上传 ZIP 不会赋予这些权限。包排除私有配置、真实凭据、虚拟环境、测试与运行数据。缺少执行能力时应报告具体缺口，不能反复尝试安装。Dify 实际导入和云端联通需在部署环境中验证。
 
 ## 文档
 

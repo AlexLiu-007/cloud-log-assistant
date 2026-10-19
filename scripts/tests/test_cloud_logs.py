@@ -221,15 +221,15 @@ class ProviderTests(unittest.TestCase):
 
     def test_tls_raw_pagination_and_sql_analysis(self):
         def page(logs, more=False, **extra):
-            data = {'result_status':'complete', 'analysis':False, 'logs':logs, 'list_over':not more, 'context':'next', **extra}
-            return SimpleNamespace(get_search_result=lambda: SimpleNamespace(**data))
-        with patch.dict(os.environ, {v:'synthetic' for v in tls.ENV.values()}), patch('volcengine.tls.TLSService.TLSService') as service:
-            service.return_value.search_logs.side_effect = [page([{'message':'a'}], True), page([{'message':'b'}])]
+            return {'ResultStatus':'complete', 'Analysis':False, 'Logs':logs, 'ListOver':not more, 'Context':'next', **extra}
+        with patch.dict(os.environ, {v:'synthetic' for v in tls.ENV.values()}), patch.object(tls, 'search_logs') as service:
+            service.side_effect = [page([{'message':'a'}], True), page([{'message':'b'}])]
             result = tls.query({}, START, END, 10)
             self.assertEqual(len(result['rows']), 2)
             self.assertTrue(result['complete'])
-            self.assertEqual(service.return_value.search_logs.call_count, 2)
-            service.return_value.search_logs.side_effect = [page([], analysis=True, analysis_result=SimpleNamespace(analysis_data=[{'message':'sql'}]))]
+            self.assertEqual(service.call_count, 2)
+            self.assertEqual(service.call_args.args[1]['Context'], 'next')
+            service.side_effect = [page([], Analysis=True, AnalysisResult={'Data':[{'message':'sql'}]})]
             result = tls.query({}, START, END, 10)
             self.assertEqual(result['rows'], [{'message':'sql'}])
             self.assertEqual(result['query_kind'], 'analysis')

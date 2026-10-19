@@ -9,7 +9,7 @@ description: 查询和分析多个云平台的日志，执行日志巡检、请�
 
 这是通用 Agent Skill。模型在宿主 Agent 侧；脚本负责查日志、归一化、生成追踪任务和补全证据，Agent 负责执行任务、解释错误及提出建议。脚本不调用模型，也不自动执行追踪任务。文档中的命令从本 skill 目录运行，配置中的 profile/query_file 相对其配置文件目录解析。
 
-安装依赖前创建本 skill 的独立 `.venv`，依赖安装和脚本执行始终使用其解释器。不使用全局环境或其他项目环境，跨平台命令见配置文档。
+使用宿主提供的 Python 3.10+ 直接运行脚本。所有内置能力只用标准库，无需创建/激活 `.venv`、运行 pip 或安装 SDK。先确认执行工具能访问 Skill 文件，再用实际解释器运行 doctor；普通 Python 不在虚拟环境中也有效。宿主缺少脚本执行、文件或网络能力时报告具体缺口，不反复安装依赖。运行方式见配置文档。
 
 先阅读 [配置与命令](references/configuration.md)，确认连接、服务规则、凭据所在环境和用户范围。只读取涉及的平台说明：
 
@@ -68,4 +68,4 @@ description: 查询和分析多个云平台的日志，执行日志巡检、请�
 
 保留云平台查询和服务格式解析两层。新服务先检查样本，添加字段映射、日志前缀正则或阶段规则；新云平台再添加适配器。按需读取官方文档，不能将尚未接入或未经验证的平台列为已支持。修改查询条件、监控频率或业务规则遵循当前用户要求。
 
-使用专属解释器运行 `scripts/package_skill.py`，按明确文件清单生成 `dist/dify/cloud-log-assistant.zip`。包只含入口、scripts、references、assets 和空环境变量样例；排除 `.venv`、`.env`、runtime、数据库及日志。新增分发文件时同步脚本清单。测试命令和验证范围见配置文档。
+用可用 Python 运行 `scripts/package_skill.py`，按明确文件清单生成 `dist/dify/cloud-log-assistant.zip`。包只含入口、scripts、references、assets 和空环境变量样例；不含依赖安装清单、`.venv`、`.env`、runtime、数据库及日志。新增分发文件时同步脚本清单。验证方式见配置文档。

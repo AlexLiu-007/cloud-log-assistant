@@ -231,10 +231,9 @@ class ProviderAndCorrelationAuditTests(unittest.TestCase):
 
     def test_tls_malformed_later_page_preserves_earlier_rows(self):
         def page(logs,more):
-            result=SimpleNamespace(logs=logs,analysis=False,result_status='complete',list_over=not more,context='cursor')
-            return SimpleNamespace(get_search_result=lambda:result)
-        with patch.dict(os.environ,{v:'synthetic' for v in tls.ENV.values()}), patch('volcengine.tls.TLSService.TLSService') as service:
-            service.return_value.search_logs.side_effect=[page([{'message':'kept'}],True),page(None,False)]
+            return {'Logs':logs,'Analysis':False,'ResultStatus':'complete','ListOver':not more,'Context':'cursor'}
+        with patch.dict(os.environ,{v:'synthetic' for v in tls.ENV.values()}), patch.object(tls,'search_logs') as service:
+            service.side_effect=[page([{'message':'kept'}],True),page(None,False)]
             result=tls.query({},START,END,10)
             self.assertFalse(result['complete'])
             self.assertEqual(result['rows'],[{'message':'kept'}])

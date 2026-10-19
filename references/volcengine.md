@@ -1,6 +1,6 @@
 # 火山引擎 TLS
 
-适配器：`scripts/providers/volcengine_tls.py`。Python SDK 是 `volcengine` 包；在本 skill 的独立虚拟环境安装 `scripts/requirements.txt`。
+适配器：`scripts/providers/volcengine_tls.py`。使用 Python 标准库直接调用 HTTPS SearchLogs REST API，不需要 volcengine SDK、pip 或虚拟环境。保留 AK/SK、STS、分页及 SQL 分析能力。
 
 ## 配置
 
@@ -36,7 +36,9 @@ CLI 将 Topic 展开为独立资源任务，最多四个资源并发。各 Topic
 
 ## 原始日志查询
 
-默认构造容器范围和可选检索词，按原始日志 API 分页。每页最多 100 条，使用 SDK 返回的 Context；到 ListOver 才确认原始查询完成。上限、重复/缺失游标以及后续页失败均标记不完整。
+默认构造容器范围和可选检索词，按原始日志 API 分页。每页最多 100 条，使用响应中的 Context；到 ListOver 才确认原始查询完成。上限、重复/缺失游标以及后续页失败均标记不完整。
+
+请求使用 `POST /SearchLogs`、`x-tls-apiversion: 0.2.0`，与原适配器使用的 SDK search_logs 协议一致。签名为 HMAC-SHA256 V4，服务名为 `TLS`，可带 X-Security-Token。endpoint 接受主机名或 HTTPS 主机地址，不跟随重定向；认证及错误响应不会作为诊断原文输出。
 
 原始字段 `__time__` 按毫秒解析；容器与实例取 `__container_name__`、`__pod_uid__` / `__pod_name__`，正文通常在 `__content__`。不假设日志正文均为 JSON。
 
@@ -46,10 +48,10 @@ CLI 将 Topic 展开为独立资源任务，最多四个资源并发。各 Topic
 
 指定 `query_file` 后可使用用户的 TLS SQL。正确处理两种返回：
 
-- `analysis=False`：从 `logs` 读取，按 Context 继续分页。
-- `analysis=True`：从 `analysis_result.analysis_data` 读取；不能继续用原始日志 Context 翻页，也不能误判为没有日志。
+- `Analysis=false`：从 REST 响应的 `Logs` 读取，按 Context 继续分页。
+- `Analysis=true`：从 `AnalysisResult.Data` 读取；不能继续用原始日志 Context 翻页，也不能误判为没有日志。
 
-检查 `result_status` 是否 complete，检查 analysis_data 为对象数组。SQL 的 LIMIT 和聚合决定实际覆盖范围；服务器完成这条 SQL 不等于获得该时间段的全部原始日志。
+检查 `ResultStatus` 是否 complete，检查 `AnalysisResult.Data` 为对象数组。SQL 的 LIMIT 和聚合决定实际覆盖范围；服务器完成这条 SQL 不等于获得该时间段的全部原始日志。
 
 TLS 查询语法按平台支持编写，不沿用其他云的 `!=` 语法。可使用已支持的 `NOT IN`、`NOT LIKE` 等表达式，但本 skill 没有默认状态码排除项。完整 trace 使用基础容器查询，避免复用只筛错误的 SQL。
 

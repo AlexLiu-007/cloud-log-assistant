@@ -348,10 +348,13 @@ def main():
                 notifications[key] = {"ready": False, "error": str(exc) if isinstance(exc, LogError) else type(exc).__name__}
         result = {"kind": "configuration", "network_checked": False,
                   "virtual_environment": sys.prefix != sys.base_prefix,
-                  "dedicated_environment": str(Path(__file__).resolve().parents[1] / ".venv"),
+                  "virtual_environment_required": False,
+                  "python_executable": sys.executable,
+                  "python_version": ".".join(str(value) for value in sys.version_info[:3]),
+                  "standard_library_only": True,
                   "connections": results,
                   "notifications": notifications,
-                  "ready": sys.prefix != sys.base_prefix and all(r["ready"] for r in results) and
+                  "ready": sys.version_info >= (3, 10) and all(r["ready"] for r in results) and
                            all(r["ready"] for r in notifications.values())}
     elif args.command in {"query", "trace", "scan"}:
         term = getattr(args, "term", None)

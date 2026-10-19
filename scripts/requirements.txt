@@ -1,3 +1,3 @@
-# Azure and local processing use the Python standard library.
-# Only the Volcengine TLS adapter needs this SDK.
-volcengine==1.0.228
+# No third-party dependencies. Run with the host's Python 3.10+.
+# Azure, Volcengine TLS, Feishu and local processing use the standard library.
+# No pip install or virtual environment is required.

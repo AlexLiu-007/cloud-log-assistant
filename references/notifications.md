@@ -32,15 +32,15 @@ FEISHU_WEBHOOK=[{"webhook":"https://open.feishu.cn/open-apis/bot/v2/hook/BOT_A",
 
 语义分类由 Agent 根据追踪证据完成，协议见 [错误分类字段](notification-classification.md)。脚本验证证据归属、字段和分组范围，完成统计、脱敏和渲染。旧 analysis-file 仍可使用；没有有效分类时仅按具体错误字段一致匹配，不猜测同类。
 
-同一提供方、服务、环境、模型、Key、上游、方法/路径/操作、状态和已知结果范围内，使用有效分类的 category/reason/subject 与原始错误码/类型合并。分析和建议措辞不参与分组。不同 Topic 可合并展示，关联与请求计数仍限定来源资源；Key 使用状态目录专用 HMAC 身份。缺少分组依据时保留独立事件。
+一级按 Key 身份 + 模型，未检测到模型时按 Key 单独分组。二级按具体错误字段或通过证据验证的 category/reason/subject 与原始错误码/类型合并。来源、状态、上游、路径和日志阶段等差异不再拆组；跨来源的请求关联仍限定来源资源。Key 使用状态目录专用 HMAC 身份，缺少可信 Key 身份时不按掩码猜测合并。
 
 `render` 预览 scan/claim 输出时传入同一 `--state-dir` 读取 Key 指纹。没有指纹时不能凭相同脱敏值合并。`enrich` 补全后由 Agent 重写分析；不要手动将补全后的明文 Key 拼入通知。
 
 ## 精简卡片与详情
 
-卡片突出日志数、已识别请求数、时间、模型、脱敏 Key、来源/上游、已记录的状态、具体错误、摘要和建议。缺失的非关键字段不占行；缺少具体错误仍明确写“错误信息：未记录”。同一请求的多条日志按同一来源资源内的 request_id 计为一个已识别请求；trace_id/correlation_id 可能跨请求，不用来宣称失败请求数。没有可信 request_id 的记录单独计数。
+卡片的一级标题只显示脱敏 Key 与已记录的模型，概要保留日志数、错误组数、时间和来源。每个错误显示一次错误信息、一份共同分析/建议，下面集中列出 request_id，不再按每条日志重复展示。request_id 精确去重、保持大小写，不截短；ID 值数量不等同于跨来源的唯一请求数。缺少 ID 的日志注明条数，不能用 trace_id/correlation_id 代替。
 
-卡片保留所有错误组，按日志严重级别排序。事件 ID、请求 ID、路径与完整分析在详情中查看。禁止展示“请求人”和“关联与追踪”整段（追踪状态、关联方式、关联依据、追踪完整性、请求结果）。查询失败/不完整等必要限制仍单独说明。
+卡片保留所有错误组，优先显示严重级别高的组。缺少具体错误仍明确写“错误信息：未记录”。状态、路径、上游、事件 ID、错误来源及完整分析在详情中查看。禁止展示“请求人”和“关联与追踪”整段（追踪状态、关联方式、关联依据、追踪完整性、请求结果）。查询失败/不完整等必要限制仍单独说明。
 
 带持久状态目录的内置 send 会先保存脱敏详情到 `STATE_DIR/reports/编号.json`，再生成卡片。长原文显示至多 240 字符，多种原文显示明确标注的代表样本；分析/建议至多 160 字符，其余内容保留在详情。代码先脱敏再截取。卡片给出详情编号，可要求 Agent 查询：
 
@@ -65,7 +65,7 @@ PYTHON scripts/cloud_logs.py report --state-dir ABSOLUTE_STATE_DIR --report-id C
 
 默认首次出现的错误立即发送；同组新日志在上次确认发送后的 900 秒内延后汇总。达到截止时间后的下一次 scan/claim 才领取待发事件，脚本不常驻、不新增调度。`repeat_interval_seconds=0` 关闭延后；可配置范围 0–86400 秒。
 
-以下情况提前提醒：新模型/Key/上游/具体原因形成新组，日志严重级别上升，CRITICAL/FATAL，或同组同目标累计至少 100 条待发日志。`repeat_escalation_count` 控制待发日志条数阈值，0 关闭，最大 1000000；该阈值不是失败率，也不是失败请求数。查询失败/不完整、追踪受阻/失败/部分完成、分类校验失败、无可靠分组依据时不执行重复延后。不从安静窗口推断恢复。
+以下情况提前提醒：新模型/Key/具体错误形成新组，日志严重级别上升，CRITICAL/FATAL，或同组同目标累计至少 100 条待发日志。`repeat_escalation_count` 控制待发日志条数阈值，0 关闭，最大 1000000；该阈值不是失败率，也不是失败请求数。查询失败/不完整、追踪受阻/失败/部分完成、分类校验失败、同组分析不一致/覆盖不足、无可靠分组依据时不执行重复延后。不从安静窗口推断恢复。
 
 此策略只用于有持久 outbox 的内置 send；单次 query/trace 直接发送不执行跨轮次延后。已延后的事件及脱敏上下文仍在队列，**不会提前记作已发送**。到期 claim 自动带回关联信息和 notification_analyses，可在证据未改变时复用；再次 enrich 会清除旧分析，由 Agent 重评。
 
@@ -83,7 +83,7 @@ send 返回 acknowledged_events、deferred_events、next_notification_at（Unix 
 
 Agent 必须先完成 [执行流程](agent-workflow.md) 的 investigation.next_actions 并 enrich。send 在联网或变更投递状态前拒绝尚未执行的追踪任务。失败、空结果或定位信息缺失可以形成明确说明局限的通知；不能用普通 REQUEST_COMPLETED、HTTP 状态或 gateway_code 代替实际错误。
 
-analysis-file 以真实 event_id 为键，支持 certainty、judgment、recommendation、内部 evidence 以及可选 classification。certainty 取 confirmed/suspected/unknown。分析和建议通常各一句；脚本不调用模型。`render` 可预览待追踪事件，但预览不能 ack。
+analysis-file 以真实 event_id 为键，支持 certainty、judgment、recommendation、内部 evidence 以及可选 classification。certainty 取 confirmed/suspected/unknown。同一错误组基于全部证据写一份分析和建议，并在各成员下复用相同文本及 certainty，证据引用分别填写。render 发现不同分析或覆盖不全时提示 Agent 统一，不任选某条代表整组；未提供分析时显示原因待确认。按分类协议修正预览后再 send，检查返回的 analysis_issues。脚本不调用模型。`render` 可预览待追踪事件，但预览不能 ack。
 
 其他宿主发送工具仍须使用 Skill 的脱敏渲染结果；跨轮次延后和分段回执由内置 send 实现。采用延后策略时不要在外部对整批执行 ack。
 

@@ -37,6 +37,8 @@ def save_report(directory, document, analyses, groups, secrets=()):
     report_id = uuid.uuid4().hex[:20]
     data = safe_data({"document": document, "analyses": analyses,
                       "groups": [{"id": group["id"], "event_ids": [row["event_id"] for row in group["records"]],
+                                  "primary_id": group["primary_id"], "analysis": group["analysis"],
+                                  "analysis_issue": group["analysis_issue"],
                                   "classification_issues": group["classification_issues"]}
                                  for group in groups]}, secrets)
     path = Path(directory) / "reports"
@@ -132,6 +134,7 @@ def select_due(directory, target, groups, policy, bypass=False):
                     (group["id"], target)).fetchone()[0]
                 escalate = policy["repeat_escalation_count"] and pending >= policy["repeat_escalation_count"]
                 defer = (not bypass and group.get("cooldown_eligible", False) and group["mergeable"] and not group["classification_issues"]
+                         and not group.get("analysis_issue")
                          and history and policy["repeat_interval_seconds"] and not expired and not escalate
                          and group["level"] < 5 and group["level"] <= history[1]
                          and now < history[0] + policy["repeat_interval_seconds"])

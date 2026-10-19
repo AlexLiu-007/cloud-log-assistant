@@ -157,8 +157,9 @@ class DeliveryTests(unittest.TestCase):
         for label in ('请求人：', '关联与追踪', '追踪状态：', '关联方式：', '关联依据：', '追踪完整性：', '请求结果：'):
             self.assertNotIn(label, card_text)
         self.assertNotIn('请求标识：', card_text)
-        self.assertIn('响应状态：', card_text)
-        self.assertIn('具体错误', card_text)
+        self.assertIn('【错误 1】', card_text)
+        self.assertIn('request_id', card_text)
+        self.assertIn('request-1', card_text)
         matches = [e['text'] for e in payload['card']['elements'] if '<at' in e.get('text', {}).get('content','')]
         self.assertTrue(matches)
         self.assertEqual(matches[0]['tag'], 'plain_text')

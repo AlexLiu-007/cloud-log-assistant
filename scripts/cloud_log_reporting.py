@@ -136,6 +136,8 @@ def public_record(record, extra_secrets=()):
     return redact({key: value for key, value in record.items() if key != "raw"}, secrets)
 
 
-def render(document, analyses=None, extra_secrets=(), group_fingerprints=None, *, allow_truncation=False):
+def render(document, analyses=None, extra_secrets=(), group_fingerprints=None, *, allow_truncation=False,
+           prepared_groups=None):
     from cloud_log_presentation import render as compact_render
-    return compact_render(document, analyses, extra_secrets, group_fingerprints, allow_truncation=allow_truncation)
+    return compact_render(document, analyses, extra_secrets, group_fingerprints, allow_truncation=allow_truncation,
+                          prepared_groups=prepared_groups)

@@ -83,7 +83,9 @@ class AgentWorkflowTests(unittest.TestCase):
             self.assertEqual(result['alerts'][0]['upstream_status'], '400')
             self.assertEqual(result['investigation']['status'], 'ready')
             self.assertEqual(result['investigation']['next_actions'], [])
-            self.assertIn('关联日志：VIDEO_CREATE_TIMING', render(result))
+            self.assertIn(ERROR_TEXT, render(result))
+            self.assertTrue(any(item['event_type'] == 'VIDEO_CREATE_TIMING'
+                                for item in result['associations'][0]['error_evidence']))
 
     def test_plain_completion_is_not_an_error_message_or_error_group(self):
         document, _ = sample()

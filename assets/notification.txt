@@ -2,7 +2,4 @@ ${title}
 
 ${details}
 
-【具体错误】
-${error}
-
-${analysis}
+${errors}

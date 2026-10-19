@@ -12,7 +12,7 @@ The model runs in the host agent. Scripts produce executable follow-up tasks; th
 - Parse service-specific log formats, correlate requests and tasks, and enrich events with evidence and uncertainty clearly identified.
 - Direct the agent through `investigation.next_actions` to retrieve request context, including INFO and DEBUG records omitted from the initial scan.
 - Store scan events in a local persistent queue and send consolidated alerts through Feishu custom bots.
-- Let the host agent classify errors from evidence; validate proposals and group within matching service, environment, model, key and upstream scopes. Analysis wording does not define group identity.
+- Let the host agent classify errors from evidence; display Key + model → error → deduplicated request_id lists, with one shared analysis per error. Missing models use a Key-only section. Source, status, path, and lifecycle differences do not split presentation groups.
 - Send compact Feishu cards with report IDs for complete details. Python redacts log fields and agent-written summaries and recommendations.
 - Delay repeated findings until 15 minutes after the previous confirmed notification. New groups, higher severity and a pending-log threshold trigger earlier delivery. Deferred events remain pending; interrupted card delivery resumes its saved progress.
 - Read credentials from environment variables and mask authorization keys in notification output.

@@ -67,13 +67,17 @@ def channel_settings(channel):
 def plain_elements(text):
     """Keep each text element small without cutting Unicode or dropping content."""
     elements, part, size = [], [], 0
-    for char in text:
-        width = len(char.encode("utf-8"))
-        if size + width > 2800:
-            elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "".join(part)}})
-            part, size = [], 0
-        part.append(char)
-        size += width
+    for line in text.splitlines(keepends=True):
+        # Keep ordinary ID lines intact; only oversized individual lines need
+        # character splitting. All original newlines and Unicode are preserved.
+        pieces = [line] if len(line.encode("utf-8")) <= 2800 else line
+        for piece in pieces:
+            width = len(piece.encode("utf-8"))
+            if size + width > 2800:
+                elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "".join(part)}})
+                part, size = [], 0
+            part.append(piece)
+            size += width
     if part:
         elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "".join(part)}})
     return elements
@@ -88,7 +92,7 @@ def card_payload(title, body, keyword, color="orange"):
             continue
         heading, separator, rest = paragraph.partition("\n")
         if heading.startswith("日志告警｜") and not separator:
-            # Service/environment names are data: escape markup and mentions.
+            # Key/model labels are data: escape markup and mentions.
             safe_heading = re.sub(r"([\\`*_\[\]])", r"\\\1", html.escape(heading, quote=False))
             if len(safe_heading.encode("utf-8")) <= 2700:
                 elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "**" + safe_heading + "**"}})
@@ -114,7 +118,7 @@ def cards(text, keyword):
     single = "\n\n---\n\n" not in text
     title = first if single and first.startswith("日志告警｜") and len(first.encode("utf-8")) <= 300 else "多云日志告警汇总"
     remaining = rest.lstrip("\n") if title == first else text
-    color = "red" if any(line in {"日志级别：ERROR", "日志级别：CRITICAL", "日志级别：FATAL"}
+    color = "red" if any(line.startswith("日志级别：") and set(line[5:].split(" / ")) & {"ERROR", "CRITICAL", "FATAL"}
                          for line in text.splitlines()) else "orange"
     result = []
     while remaining:
@@ -245,7 +249,7 @@ def send_document(config, channel_id, document, analyses, directory=None, secret
                 target_document["alerts" if "alerts" in document else "records"] = [r for r in records if r["event_id"] in included]
                 target_document["associations"] = [g for g in document.get("associations", []) if set(g.get("event_ids", [])) & included]
                 parts = cards(render(target_document, analyses, secrets, fingerprints,
-                                     allow_truncation=bool(report_id)), keyword)
+                                     allow_truncation=bool(report_id), prepared_groups=due), keyword)
                 plans.append(create_plan(directory, target["id"], due, parts, report_id) if delivery_id and due else
                              {"parts": parts, "next_part": 0, "event_ids": [], "report_id": report_id})
             for plan in plans:
@@ -278,4 +282,5 @@ def send_document(config, channel_id, document, analyses, directory=None, secret
             "delivery_id": delivery_id, **completion, "targets": results,
             "report_id": reports_used[0] if reports_used else report_id,
             "report_ids": list(dict.fromkeys(reports_used or ([report_id] if report_id else []))),
+            "analysis_issues": {group["id"]: group["analysis_issue"] for group in groups if group["analysis_issue"]},
             "classification_issues": {event_id: issue for group in groups for event_id, issue in group["classification_issues"].items()}}

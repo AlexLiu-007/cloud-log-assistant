@@ -19,13 +19,6 @@ def value(item):
     return "" if text.casefold() in {"", "未记录", "不适用", "unknown", "none", "null", "n/a", "-"} else text
 
 
-def request_identity(record):
-    """Count only scoped request IDs; trace/correlation IDs may span several requests."""
-    if not all(value(record.get(key)) for key in ("connection_id", "resource", "request_id")):
-        return None
-    return tuple(value(record.get(key)) for key in ("provider", "connection_id", "resource", "request_id"))
-
-
 def validate_classification(record, association, analysis):
     """Check evidence membership and shape. Semantic correctness remains the agent's job."""
     proposal = analysis.get("classification")
@@ -74,6 +67,25 @@ def authorization_identity(record, fingerprints):
     return ("raw", authorization)
 
 
+def shared_analysis(group):
+    """Only publish a diagnosis the Agent supplied consistently for every member."""
+    proposals = []
+    for record in group["records"]:
+        analysis = group["analyses"][record["event_id"]]
+        certainty = analysis.get("certainty")
+        if certainty not in ("confirmed", "suspected", "unknown"):
+            certainty = "unknown"
+        proposals.append((value(analysis.get("judgment")), value(analysis.get("recommendation")), certainty))
+    if not any(judgment or recommendation for judgment, recommendation, _ in proposals):
+        return {}, ""
+    if any(not judgment for judgment, _, _ in proposals):
+        return {}, "该错误组缺少覆盖全部事件的统一分析，请 Agent 补全"
+    if len(set(proposals)) != 1:
+        return {}, "同组分析或建议不一致，请 Agent 结合全部证据统一分析"
+    judgment, recommendation, certainty = proposals[0]
+    return {"judgment": judgment, "recommendation": recommendation, "certainty": certainty}, ""
+
+
 def notification_groups(document, analyses=None, fingerprints=None):
     saved = document.get("notification_analyses", {})
     if not isinstance(saved, dict) or (analyses is not None and not isinstance(analyses, dict)):
@@ -94,20 +106,18 @@ def notification_groups(document, analyses=None, fingerprints=None):
         classification, issue = validate_classification(record, association, analysis)
         authorization = authorization_identity(record, fingerprints or {})
         errors = tuple(value(record.get(key)) for key in ERROR_FIELDS)
+        # Presentation is Key/model -> error. Scope remains on the records for
+        # tracing and receipts, but status, source and lifecycle never split cards.
+        primary = (("key-model-v2", authorization, value(record.get("model")))
+                   if authorization else ("unidentified-key-v2", event_id))
         signature = None
-        if value(record.get("model")) and authorization and any(errors) and not (
-                association.get("ambiguous") or association.get("error_conflict")):
+        if authorization and any(errors):
             error_identity = (("agent", classification["category"], classification["reason"], classification["subject"],
                                errors[0], errors[1]) if classification else ("exact", *errors))
-            signature = (
-                *(value(record.get(key)) for key in ("provider", "service", "environment", "model")),
-                authorization, error_identity,
-                *(value(record.get(key)) for key in ("upstream_provider", "upstream_channel", "upstream_model",
-                                                     "method", "path", "operation", "gateway_status", "upstream_status")),
-                value(association.get("outcome", record.get("outcome"))),
-            )
+            signature = (primary, error_identity)
         if signature is None or signature not in positions:
             group = {"id": digest(signature) if signature is not None else digest(["event", event_id]),
+                     "primary_id": digest(primary),
                      "mergeable": signature is not None, "records": [], "analyses": {},
                      "classifications": {}, "associations": {}, "classification_issues": {}}
             if signature is not None:
@@ -124,4 +134,15 @@ def notification_groups(document, analyses=None, fingerprints=None):
             group["classification_issues"][event_id] = issue
     for group in groups:
         group["level"] = max(LEVELS.get(str(row.get("level", "")).upper(), 2) for row in group["records"])
+        group["analysis"], group["analysis_issue"] = shared_analysis(group)
     return sorted(groups, key=lambda group: -group["level"])
+
+
+def notification_sections(groups):
+    """Nest error groups without changing their individual cooldown/receipt IDs."""
+    sections = {}
+    for group in groups:
+        section = sections.setdefault(group["primary_id"], {"records": [], "groups": []})
+        section["records"].extend(group["records"])
+        section["groups"].append(group)
+    return list(sections.values())

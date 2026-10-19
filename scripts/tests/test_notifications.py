@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cloud_log_common import LogError
-from cloud_log_delivery import send_document
+from cloud_log_delivery import cards, send_document
 from cloud_log_grouping import notification_groups
 from cloud_log_notify_state import read_report, settings
 from cloud_log_reporting import render
@@ -44,6 +44,13 @@ def classification(row, **changes):
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_complete_local_cli_workflow(self):
+        from notification_demo import run_demo
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_demo(Path(directory) / "workflow")
+            self.assertTrue(result["checks_passed"])
+            self.assertEqual(result["send"]["acknowledged_events"], 6)
+
     def test_different_wording_requires_agent_evidence(self):
         rows = [event(1, error_message="Input content violates policy"),
                 event(2, error_message="Content rejected by safety policy")]
@@ -68,10 +75,9 @@ class ClassificationTests(unittest.TestCase):
             self.assertEqual(len(groups), 2)
             self.assertTrue(all(group["classification_issues"] for group in groups))
 
-    def test_codes_subjects_upstreams_keys_and_models_keep_boundaries(self):
-        for field, changed in (("error_code", "OTHER"), ("upstream_provider", "other"),
-                               ("authorization", "Bearer different-secret-987654"), ("model", "other-model"),
-                               ("environment", "test"), ("operation", "DeleteAsset"), ("path", "/other")):
+    def test_codes_subjects_keys_and_models_keep_boundaries(self):
+        for field, changed in (("error_code", "OTHER"), ("error_type", "OTHER"),
+                               ("authorization", "Bearer different-secret-987654"), ("model", "other-model")):
             rows = [event(1), event(2)]
             rows[1][field] = changed
             analyses = {row["event_id"]: classification(row) for row in rows}
@@ -88,7 +94,9 @@ class ClassificationTests(unittest.TestCase):
         self.assertFalse(notification_groups({"records": [row]}, {row["event_id"]: analysis})[0]["classifications"])
         analysis["certainty"] = "confirmed"
         group = notification_groups({"records": [row], "association": {"error_conflict": True}}, {row["event_id"]: analysis})[0]
-        self.assertFalse(group["mergeable"])
+        self.assertFalse(group["classifications"])
+        self.assertTrue(group["classification_issues"])
+        self.assertTrue(group["mergeable"])  # Exact error display is not request correlation.
 
     def test_analysis_shape_and_duplicate_ids_are_rejected(self):
         row = event(1)
@@ -98,13 +106,95 @@ class ClassificationTests(unittest.TestCase):
         with self.assertRaises(LogError):
             notification_groups({"records": [row, row]})
 
-    def test_request_counts_do_not_count_log_lines_as_requests(self):
+    def test_request_ids_are_listed_once_not_counted_as_log_lines(self):
         rows = [event(1), event(1, marker="second-log"), event(2)]
         text = render({"records": rows})
-        self.assertIn("3 条异常日志 · 2 个已识别请求", text)
+        self.assertIn("3 条异常日志 · 1 类错误", text)
+        self.assertIn("request_id（2 个）：\nrequest-1\nrequest-2", text)
+        self.assertEqual(text.count("\nrequest-1\n"), 1)
         self.assertNotIn("失败请求", text)
         rows[2]["request_id"] = ""
-        self.assertIn("1 条缺少请求标识", render({"records": rows}))
+        self.assertIn("1 条日志未记录 request_id", render({"records": rows}))
+
+    def test_missing_model_and_status_match_screenshot(self):
+        rows = [event(i, error_code="AUTH_KEY_BLOCKED", error_message="blocked") for i in range(3)]
+        for row in rows:
+            row["model"] = ""
+        rows[1].update(gateway_status="403", outcome="failed", stage="completed")
+        rows[2].update(model=None, request_id=rows[0]["request_id"], stage="auth_observation")
+        analyses = {row["event_id"]: {"certainty": "confirmed", "judgment": "授权 Key 被策略拦截",
+                                    "recommendation": "检查 Key 状态和封禁规则"} for row in rows}
+        with tempfile.TemporaryDirectory() as directory:
+            document = claim(directory, rows)
+            fingerprints = load_authorization_fingerprints(directory, [row["event_id"] for row in rows])
+            groups = notification_groups(document, analyses, fingerprints)
+            self.assertEqual(len(groups), 1)
+            text = render(document, analyses, group_fingerprints=fingerprints)
+        self.assertNotIn("模型：", text)
+        self.assertEqual(text.count("AUTH_KEY_BLOCKED"), 1)
+        self.assertEqual(text.count("分析：授权 Key 被策略拦截"), 1)
+        self.assertEqual(text.count("建议：检查 Key 状态和封禁规则"), 1)
+        self.assertIn("request_id（2 个）", text)
+
+    def test_source_status_path_and_stage_do_not_split_errors(self):
+        first, second = event(1), event(2)
+        second.update(provider="volcengine_tls", connection_id="other", resource="other-topic",
+                      service="other-service", environment="test", upstream_provider="other",
+                      upstream_channel="other", upstream_model="other", method="GET", path="/other",
+                      operation="DeleteAsset", gateway_status="403", upstream_status="400",
+                      outcome="failed", stage="completed", level="WARNING")
+        document = {"records": [first, second]}
+        self.assertEqual(len(notification_groups(document)), 1)
+        self.assertEqual(len(notification_groups(document, {row["event_id"]: classification(row)
+                                                           for row in document["records"]})), 1)
+        self.assertEqual(cards(render(document), "")[0]["card"]["header"]["template"], "red")
+
+    def test_key_model_sections_contain_separate_error_groups(self):
+        rows = [event(1), event(2, error_message="another error"), event(3), event(4)]
+        rows[2]["model"] = ""
+        rows[3]["model"] = "another-model"
+        groups = notification_groups({"records": rows})
+        self.assertEqual(len(groups), 4)
+        self.assertEqual(len({group["primary_id"] for group in groups}), 3)
+        text = render({"records": rows})
+        self.assertEqual(text.count("日志告警｜Key："), 3)
+        self.assertEqual(text.count("｜模型："), 2)
+        self.assertIn("2 条异常日志 · 2 类错误", text)
+
+    def test_analysis_conflicts_do_not_pick_one_member(self):
+        rows = [event(1), event(2)]
+        analyses = {row["event_id"]: {"certainty": "confirmed", "judgment": "说明一", "recommendation": "建议一"}
+                    for row in rows}
+        document = {"records": rows}
+        self.assertEqual(render(document, analyses).count("分析：说明一"), 1)
+        analyses[rows[1]["event_id"]]["judgment"] = "说明二"
+        group = notification_groups(document, analyses)[0]
+        self.assertTrue(group["analysis_issue"])
+        self.assertNotIn("说明一", render(document, analyses))
+        self.assertNotIn("说明二", render(document, analyses))
+        # Per-target subsets retain the diagnosis resolved over the whole batch.
+        subset = {**group, "records": [rows[0]]}
+        self.assertIn("同组分析或建议不一致", render({"records": rows[:1]}, prepared_groups=[subset]))
+        analyses.pop(rows[1]["event_id"])
+        self.assertIn("覆盖全部事件", render(document, analyses))
+
+    def test_same_id_across_sources_is_a_value_list_not_request_count(self):
+        rows = [event(1), event(2)]
+        rows[1].update(request_id=rows[0]["request_id"], connection_id="other", resource="other")
+        text = render({"records": rows})
+        self.assertIn("request_id（1 个）", text)
+        self.assertNotIn("1 个已识别请求", text)
+
+    def test_all_request_ids_survive_capacity_splitting(self):
+        rows = [event(i) for i in range(2000)]
+        text = render({"records": rows, "notification_report_id": "f" * 20}, allow_truncation=True)
+        payloads = cards(text, "")
+        self.assertGreater(len(payloads), 1)
+        lines = [line for payload in payloads for item in payload["card"]["elements"]
+                 for line in item.get("text", {}).get("content", "").splitlines()]
+        for row in rows:
+            self.assertEqual(lines.count(row["request_id"]), 1, row["request_id"])
+        self.assertEqual(text.count("分析："), 1)
 
     def test_masks_are_not_used_as_key_identity(self):
         rows = [event(1, authorization="abcd-first-secret-wxyz"), event(2, authorization="abcd-second-secret-wxyz")]
@@ -173,6 +263,26 @@ class NotificationStateTests(unittest.TestCase):
         for row in (event(2, error_message="Different error"), event(3, level="CRITICAL")):
             self.assertEqual(self.send(claim(self.directory, [row]))["sent_messages"], 1)
 
+    def test_key_only_error_repeats_across_status_and_source_changes(self):
+        rows = [event(i, error_code="AUTH_KEY_BLOCKED", error_message="blocked") for i in (1, 2)]
+        for row in rows:
+            row["model"] = ""
+        rows[1].update(gateway_status="403", resource="other-topic", upstream_provider="other")
+        self.send(claim(self.directory, rows[:1]))
+        self.clock.return_value = 1100
+        result = self.send(claim(self.directory, rows[1:]))
+        self.assertEqual((result["acknowledged_events"], result["deferred_events"]), (0, 1))
+
+    def test_shared_analysis_and_group_hierarchy_saved_in_report(self):
+        rows = [event(1), event(2)]
+        analyses = {row["event_id"]: {"certainty": "confirmed", "judgment": "同一明确错误"} for row in rows}
+        result = self.send(claim(self.directory, rows), analyses)
+        report = read_report(self.directory, result["report_id"])
+        self.assertEqual(len(report["groups"]), 1)
+        self.assertEqual(len(report["groups"][0]["event_ids"]), 2)
+        self.assertEqual(report["groups"][0]["analysis"]["judgment"], "同一明确错误")
+        self.assertEqual(result["analysis_issues"], {})
+
     def test_severity_increase_and_query_failure_bypass_cooldown(self):
         self.send(claim(self.directory, [event(1, level="WARNING")]))
         self.clock.return_value = 1100
@@ -216,7 +326,7 @@ class NotificationStateTests(unittest.TestCase):
         self.assertEqual((result["sent_messages"], result["acknowledged_events"]), (1, 1))
 
     def test_partial_card_failure_resumes_frozen_plan_even_with_smaller_batch(self):
-        rows = [event(i, error_message=f"Distinct error {i}") for i in range(20)]
+        rows = [event(i, error_message=f"Distinct error {i}") for i in range(80)]
         document = claim(self.directory, rows)
         self.post.side_effect = [None, LogError("simulated network failure")]
         with self.assertRaises(LogError):
@@ -225,8 +335,8 @@ class NotificationStateTests(unittest.TestCase):
         failed = deepcopy(self.post.call_args_list[1].args[2])
         self.post.reset_mock(side_effect=True)
         retry = claim(self.directory, size=1)
-        self.assertEqual(len(retry["alerts"]), 20)
-        self.assertEqual(self.send(retry, {rows[0]["event_id"]: {"judgment": "New words"}})["acknowledged_events"], 20)
+        self.assertEqual(len(retry["alerts"]), len(rows))
+        self.assertEqual(self.send(retry, {rows[0]["event_id"]: {"judgment": "New words"}})["acknowledged_events"], len(rows))
         self.assertEqual(self.post.call_args_list[0].args[2], failed)
         self.assertNotIn(successful, [call.args[2] for call in self.post.call_args_list])
 

@@ -31,12 +31,11 @@ class MultiSourceTests(unittest.TestCase):
         self.assertIn('2 条异常日志', text)
         self.assertIn('another-topic', text)
         self.assertEqual(len(notification_groups({'records':[first, second]})[0]['records']), 2)
-        self.assertNotIn('request-a', text)
-        self.assertNotIn('request-b', text)
+        self.assertIn('request-a', text)
+        self.assertIn('request-b', text)
 
         for field, value in (('model', 'model-b'), ('authorization', 'Bearer another-key-987654'),
-                             ('error_message', 'A different error'), ('upstream_provider', 'other'),
-                             ('outcome', 'failed')):
+                             ('error_message', 'A different error')):
             with self.subTest(field=field):
                 left = dict(first)
                 right = dict(second)
@@ -55,14 +54,15 @@ class MultiSourceTests(unittest.TestCase):
         self.assertNotIn(TOKEN,payload)
         elements = result[0]['card']['elements']
         titles = [e['text'] for e in elements if e.get('text',{}).get('content','').startswith('**日志告警｜')]
-        self.assertEqual(len(titles), 2)
-        self.assertTrue(all(t['tag']=='lark_md' and t['content'].endswith('**') for t in titles))
-        self.assertEqual(sum(e['tag']=='hr' for e in elements), 1)
+        self.assertEqual(len(titles), 0)  # One Key/model heading is now in the card header.
+        self.assertIn('日志告警｜Key：', result[0]['card']['header']['title']['content'])
+        self.assertIn('2 条异常日志 · 1 类错误', payload)
+        self.assertEqual(sum(e['tag']=='hr' for e in elements), 0)
         self.assertFalse(any(e['tag']=='note' for e in elements))
         self.assertIn('test', result[0]['card']['header']['title']['content'])
 
     def test_large_batch_splits_only_for_capacity(self):
-        rows=[record(marker=i, error_message=f'Distinct error {i}') for i in range(20)]
+        rows=[record(marker=i, error_message=f'Distinct error {i}') for i in range(80)]
         result=cards(render({'records':rows}),'test')
         self.assertGreater(len(result),1)
         self.assertLess(len(result),len(rows))

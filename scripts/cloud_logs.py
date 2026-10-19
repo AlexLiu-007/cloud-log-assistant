@@ -16,6 +16,7 @@ from cloud_log_common import (LogError, config_connections, digest, get_profile,
 from cloud_log_correlation import IDENTIFIERS, correlate
 from cloud_log_parsing import SECRET_NAMES, key_name, normalize
 from cloud_log_reporting import collect_secrets, render
+from cloud_log_workflow import plan_investigation, query_status
 from cloud_log_state import (advance_scan_cursors, enqueue_and_claim, load_scan_cursors,
                              load_authorization_fingerprints, purge_sent, receipt)
 
@@ -56,12 +57,20 @@ def query_one(connection, start, end, term=None, context=False, limit=None):
     if connection.get("_topic_id"):
         source["resource"] = connection["_topic_id"]
     try:
+        module = adapter(connection)
+        if hasattr(module, "resource_id"):
+            try:
+                source["resource"] = module.resource_id(connection)
+            except LogError:
+                pass  # The adapter query reports missing/invalid configuration.
+        if context:
+            connection = {key: value for key, value in connection.items() if key != "query_file"}
         validate_connection(connection)
         count = limit if limit is not None else int(connection.get("max_rows", 10000))
         if count < 1 or int(connection.get("max_pages", 100)) < 1:
             raise LogError("max_rows、max_pages 必须大于零")
         profile = get_profile(connection)
-        response = adapter(connection).query(connection, start, end, count, term=term, context=context)
+        response = module.query(connection, start, end, count, term=term, context=context)
         records, warnings = [], list(response.get("warnings", []))
         parse_failures, missing_levels = 0, 0
         occurrences = {}
@@ -111,13 +120,22 @@ def query_all(args, config, connections, *, term=None, context=False, period=Non
         return query_one(connection, per_connection_starts.get(connection["id"], start),
                          end, term, context, args.max_rows)
     jobs, results = [], []
+    resource = getattr(args, "resource", None)
     for connection in connections:
         try:
             module = adapter(connection)
-            jobs.extend(module.expand_connections(connection) if hasattr(module, "expand_connections") else [connection])
+            expanded = module.expand_connections(connection) if hasattr(module, "expand_connections") else [connection]
+            if resource:
+                if not hasattr(module, "resource_id"):
+                    raise LogError("此适配器尚未实现按资源追踪")
+                expanded = [item for item in expanded if module.resource_id(item) == resource]
+                if not expanded:
+                    raise LogError("指定资源不在所选连接的可用配置中，未扩大查询范围")
+            jobs.extend(expanded)
         except Exception as exc:
             error = str(exc) if isinstance(exc, LogError) else "连接展开失败（" + type(exc).__name__ + "）"
             results.append(({"connection_id": connection["id"], "provider": connection.get("provider", ""),
+                             "resource": resource or "",
                              "query_start": per_connection_starts.get(connection["id"], start).isoformat(),
                              "query_end": end.isoformat(), "status": "failed", "complete": False,
                              "error": error, "warnings": []}, []))
@@ -155,9 +173,12 @@ def trace_result(document, field, value, cross_connections):
         complete = all(s.get("complete") is True for s in scoped_sources) if scoped_sources else document["complete"]
         association = correlate(records, records[0]["event_id"], field=field,
                                 cross_connections=cross_connections, complete=complete)
+        association["trace_status"] = query_status(document, scoped_sources)
         association["event_ids"] = [r["event_id"] for r in association.pop("records")]
         associations.append(association)
     document.update(kind="trace", associations=associations, matched_identifier={"field": field, "value": value})
+    document["trace_summary"] = {"status": query_status(document, document.get("sources", [])),
+                                 "matched_records": len(document["records"])}
     return document
 
 
@@ -242,6 +263,7 @@ def main():
             command.add_argument("--id-field", choices=IDENTIFIERS, default="request_id")
             command.add_argument("--id-value", required=True)
             command.add_argument("--cross-connections", action="store_true")
+            command.add_argument("--resource", help="Query only this configured Topic/workspace")
         if name in {"scan", "claim"}:
             command.add_argument("--state-dir")
             command.add_argument("--lease-seconds", type=int, default=900)
@@ -275,6 +297,11 @@ def main():
     command.add_argument("--input", required=True)
     command.add_argument("--context", action="append", required=True, help="Repeat for additional query/trace JSON files")
     command.add_argument("--output", required=True)
+    command = sub.add_parser("plan", help="Generate follow-up tasks without querying cloud services")
+    command.add_argument("--input", required=True)
+    command.add_argument("--output")
+    command.add_argument("--trace-all", action="store_true", default=None)
+    command.add_argument("--trace-window-seconds", type=int)
     for name in ("ack", "release"):
         command = sub.add_parser(name)
         command.add_argument("--state-dir")
@@ -294,6 +321,8 @@ def main():
             config = read_json(args.config)
         else:
             config, connections = config_connections(args.config, args.connection)
+    if "trace_window_seconds" in config:
+        plan_investigation({}, window_seconds=config["trace_window_seconds"])
     if args.command == "doctor":
         from cloud_log_delivery import channel_settings
         zone(config.get("output_timezone", "+00:00"))
@@ -331,6 +360,8 @@ def main():
             if not term:
                 raise LogError("缺少检索词环境变量：" + args.term_env)
         if args.command == "trace":
+            if not args.id_value.strip():
+                raise LogError("追踪标识不能为空")
             term = args.id_value
         period = window(args, config)
         cursor_state, scopes, starts = None, {}, None
@@ -370,6 +401,10 @@ def main():
     elif args.command == "enrich":
         from cloud_log_enrichment import enrich
         result = enrich(read_json(args.input), [read_json(path) for path in args.context])
+    elif args.command == "plan":
+        result = read_json(args.input)
+        result["investigation"] = plan_investigation(result, window_seconds=args.trace_window_seconds,
+                                                      trace_all=args.trace_all)
     elif args.command == "normalize":
         if len(connections) != 1:
             raise LogError("离线解析需用 --connection 选择一个来源")
@@ -392,7 +427,7 @@ def main():
                                 field=args.id_field, cross_connections=args.cross_connections,
                                 window_seconds=profile.get("heuristic_window_seconds", args.window_seconds),
                                 heuristic_fields=profile.get("heuristic_fields", ("path", "actor", "model")),
-                                complete=result.get("complete", False))
+                                complete=query_status(result, result.get("sources", [])) == "complete")
         result = {key: value for key, value in result.items() if key not in {"records", "alerts", "associations"}}
         result.update(kind="correlation", records=association.pop("records"), association=association)
     elif args.command == "render":
@@ -428,6 +463,11 @@ def main():
         result = purge_sent(state_dir(args), args.retention_days)
     else:
         result = receipt(state_dir(args), args.delivery_id, args.command == "ack")
+    if args.command in {"query", "trace", "scan", "claim", "normalize", "correlate", "enrich"}:
+        result["investigation"] = plan_investigation(result, window_seconds=config.get("trace_window_seconds"))
+    if "investigation" in result:
+        result = {"investigation": result["investigation"],
+                  **{key: value for key, value in result.items() if key != "investigation"}}
     write_json(result, args.output)
     if args.command == "doctor" and not result["ready"]:
         return 2

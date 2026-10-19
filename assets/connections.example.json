@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "window_seconds": 300,
+  "trace_window_seconds": 300,
   "output_timezone": "+08:00",
   "redact_env": [],
   "notifications": {

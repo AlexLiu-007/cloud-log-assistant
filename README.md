@@ -4,10 +4,13 @@
 
 多云日志查询与分析 Agent Skill。它可以从 Azure Log Analytics 和火山引擎 TLS 查询日志，关联请求链路、补全事件上下文，并生成脱敏后的告警内容。
 
+模型运行在宿主 Agent 侧。脚本生成可执行的追踪任务，Agent 按任务取回真实日志、合并证据并分析原因。
+
 ## 功能
 
 - 查询多个云平台、账号、区域和服务，并保留每条日志的来源。
 - 按服务规则解析日志，关联请求与任务，补查上下文并标明证据或不确定性。
+- 通过 `investigation.next_actions` 指挥 Agent 继续追踪；初次扫描没有错误详情时，补查包含 INFO、DEBUG 的同请求日志。
 - 将巡检事件写入本地持久队列，并通过飞书自定义机器人发送合并告警。
 - 通知按相同服务、模型、授权 Key 和错误合并展示；每条底层事件及投递回执仍独立保存。
 - 使用环境变量提供凭据；通知输出会遮挡授权 Key。
@@ -44,9 +47,26 @@ PYTHON scripts/cloud_logs.py query --config assets/connections.json --env-file .
 
 将 `PYTHON` 替换为本虚拟环境的解释器路径：Windows 使用 `./.venv/Scripts/python.exe`，macOS / Linux 使用 `./.venv/bin/python`。查询云端需要有效的连接配置和凭据；`doctor` 检查本地配置与依赖，不验证云端连通性。
 
+## Agent 运行流程
+
+`scan/query → 读取 investigation → Agent 执行 trace → enrich → Agent 分析 → render → 按授权 send`
+
+追踪任务限定具体连接、Topic/Workspace 和异常发生时间附近的范围。空结果、失败和截断结果也要 enrich，避免无限重复查询。错误证据与链路完整性分别判断；普通完成日志不会代替具体错误。`send` 会拒绝仍有未执行追踪任务的批次。完整协议与可复制的 Agent 提示词见 [Agent 执行流程](references/agent-workflow.md)。
+
+## Dify ZIP 分发
+
+```text
+PYTHON scripts/package_skill.py
+```
+
+生成 `dist/dify/cloud-log-assistant.zip`，ZIP 根目录包含 SKILL.md。若你的 Dify 页面提供 Skill ZIP 导入入口，可上传此文件并为 Agent 启用该 Skill；使用流程文档末尾的提示词。这里分发的是 Agent Skill ZIP。
+
+实际执行环境需要文件读取、Python 脚本执行、云日志网络访问、凭据注入和持久状态目录。上传 ZIP 不会自动配置这些能力。包使用明确文件清单，排除私有配置、真实凭据、虚拟环境、测试与运行数据。Dify 实际导入和云端联通需在部署环境中验证。
+
 ## 文档
 
 - [配置与命令](references/configuration.md)
+- [Agent 执行流程与运行提示词](references/agent-workflow.md)
 - [日志关联规则](references/correlation.md)
 - [告警格式与通知渠道](references/notifications.md)
 - [接入扩展服务](references/extending.md)

@@ -5,5 +5,7 @@
 __pycache__/
 *.py[cod]
 runtime/
+dist/
+assets/connections.json
 *.sqlite3*
 *.log

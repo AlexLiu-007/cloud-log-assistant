@@ -39,6 +39,11 @@ def expand_connections(connection):
     return [{**connection, "_topic_id": topic} for topic in configured_topics(connection)]
 
 
+def resource_id(connection):
+    topics = configured_topics(connection)
+    return topics[0] if len(topics) == 1 else ""
+
+
 def configuration_status(connection):
     topics = configured_topics(connection)
     return {"environment": credential_status(connection, {k:v for k,v in ENV.items() if k != "topic_id_env"}),

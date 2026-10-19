@@ -166,6 +166,9 @@ def post(webhook, secret, payload, timeout):
 
 
 def send_document(config, channel_id, document, analyses, directory=None, secrets=()):
+    from cloud_log_workflow import plan_investigation
+    if plan_investigation(document)["next_actions"]:
+        raise LogError("存在尚未执行的追踪任务；先执行 investigation.next_actions，再用 enrich 合并结果（包括空结果或查询失败）。预览请用 render")
     channel = config.get("notifications", {}).get(channel_id)
     if not channel:
         raise LogError("通知渠道不存在：" + channel_id)

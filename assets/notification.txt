@@ -13,6 +13,7 @@ ${operation_line}请求模型：${model}
 响应状态：${response_label} ${gateway_status} / 上游 ${upstream_status}
 
 【关联与追踪】
+追踪状态：${trace_status}
 关联方式：${association_mode}
 关联依据：${association_evidence}
 追踪完整性：${completeness}
@@ -22,6 +23,7 @@ ${operation_line}请求模型：${model}
 错误代码：${error_code}
 错误类型：${error_type}
 错误信息：${error_message}
+错误来源：${error_source}
 
 【错误分析】
 分析：${judgment}

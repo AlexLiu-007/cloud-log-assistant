@@ -30,6 +30,8 @@ def query(connection, start, end, limit, term=None, context=False):
 
 框架随后统一解析、按级别筛选、保留来源并组织结果。新的 SDK 只在该适配器中加载，避免某个云缺依赖导致其他云无法工作。
 
+要支持自动任务中的 `trace --resource`，还须实现 `resource_id(connection)`，返回该实际查询任务的唯一资源标识，与 query 返回的 resource 一致。多资源适配器实现 `expand_connections(connection)`，先拆成各资源任务，再由 resource_id 精确筛选。该函数只读取配置/环境，不联网。未实现时限定资源的追踪明确失败，禁止退回全资源搜索。`context=True` 必须移除异常级别筛选和自定义异常 query_file，保留用户的服务范围条件。
+
 ## 接入流程
 
 1. 确认云平台、日志产品、区域、身份方式和目标资源；读取目标平台官方接口文档。

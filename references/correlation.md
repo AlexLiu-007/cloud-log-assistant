@@ -59,3 +59,11 @@
 关联器不会发起无限追查。需扩展上下文时，根据现有证据执行新的明确时间范围查询，并保留来源与查询完整性。没有足够历史信息时如实报告；未来精确追踪需要应用传播标识。
 
 `enrich` 用明确标识把补查结果中的缺失字段带回原告警批次，并记录字段来源。多入口、多结束等歧义时不自动补全；冲突字段留空，结束成功的记录不借用重试阶段的错误作为最终错误。无 ID 或仅业务 ID 的场景继续由 Agent 做有边界的上下文分析。
+
+## 追踪覆盖与增量证据
+
+`investigation` 的执行协议见 [Agent 执行流程](agent-workflow.md)。`trace_status` 表示是否实际查过相应范围及查询是否完整，`completeness` 表示是否观察到请求边界，`error_evidence_status` 表示是否有具体错误。三者独立；完整查询仍可能没有错误详情或请求边界。
+
+`enrich` 核对来源、标识和查询时间范围，保留 `context_records`、`context_event_ids`、`error_evidence`、`field_sources`、`trace_queries`。空/失败的 trace 依靠 `matched_identifier` 和来源诊断记录尝试；带 `selection=exclude_INFO_DEBUG` 的上下文只能补充字段，不能解除全级别追踪任务。
+
+多次 enrich 应以最近输出为输入。新错误与旧证据冲突时，撤回旧的自动补全并标记 `error_conflict`；原记录自带字段保留。错误代码、类型、消息须能由同一条证据一致支持，不从不同重试拼接。各条错误仍保留供 Agent 分析。成功结束记录可保留重试错误证据，但不将其填为最终错误。

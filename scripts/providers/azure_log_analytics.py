@@ -17,6 +17,10 @@ def configuration_status(connection):
     return {"environment": credential_status(connection, ENV), "dependency": "Python standard library"}
 
 
+def resource_id(connection):
+    return env_setting(connection, "workspace_id_env", ENV["workspace_id_env"], required=False)
+
+
 def post(url, body, headers, timeout):
     if urlparse(url).scheme != "https":
         raise LogError("Azure 接口必须使用 HTTPS")

@@ -35,6 +35,7 @@ plugin-api 使用 `assets/profiles/plugin-api.json`。设置 `VOLC_PLUGIN_LOG_TO
 - 输出脱敏会按环境变量配置字段名识别 `api_key_env`、`password_env`、`authorization_env` 等凭据。自定义适配器使用非标准字段名时，在配置根级 `redact_env` 中列出凭据环境变量名，例如 `"redact_env": ["CUSTOM_PROVIDER_CREDENTIAL"]`。
 - 云端凭据不放进 JSON/skill。 `.env.example` 只列空变量；本地 `.env` 通过 `--env-file` 明确加载，不搜索其他项目环境文件，不执行变量展开或 shell 代码。已有进程环境优先。
 - `window_seconds` 是未指定时间时的查询窗口；样例 300 秒。`output_timezone` 是报告时区，样例 `+08:00`。CLI 的绝对开始/结束时间必须含时区。
+- `trace_window_seconds` 是追踪任务围绕异常时间向前、向后各扩展的秒数，默认 300，必须为 1–86400 的整数；与 scan 查询窗口独立。
 - 默认查询及巡检只排除 INFO、DEBUG，不按状态码或路径排除。级别缺失保留。上下文查询 `--all-levels` 及 `trace` 包含所有级别。
 - `max_rows` 表示每个资源本轮最多取回的原始行数（筛选前），火山数组中每个 Topic 独立计算；`max_pages` 是每个 Topic 的页数上限。达到上限保留已取数据并标记不完整。不要将有上限的结果当作全量计数。
 - 默认在客户端从元数据/前缀判断级别，避免不同格式造成服务端误过滤。已确认结构化字段后可以使用自定义查询提高效率，再保留本地级别复核。
@@ -50,6 +51,7 @@ PYTHON scripts/cloud_logs.py query --config assets/connections.example.json --en
 PYTHON scripts/cloud_logs.py query --config assets/connections.example.json --env-file .env --connection azure-ai --connection volc-cn --start 2026-10-17T11:00:00+08:00 --end 2026-10-17T11:05:00+08:00 --output runtime/query.json
 PYTHON scripts/cloud_logs.py query --config assets/connections.example.json --env-file .env --term-env REQUEST_AUTH_KEY --since 1h --all-levels --output runtime/key-search.json
 PYTHON scripts/cloud_logs.py trace --config assets/connections.example.json --env-file .env --id-field request_id --id-value REQUEST_ID --since 1h --output runtime/trace.json
+PYTHON scripts/cloud_logs.py plan --input runtime/query.json --trace-all --trace-window-seconds 600 --output runtime/planned.json
 PYTHON scripts/cloud_logs.py correlate --input runtime/query.json --anchor EVENT_ID --profile assets/profiles/gateway.json --output runtime/correlation.json
 PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output runtime/notification.txt
 ```
@@ -58,9 +60,13 @@ PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output ru
 
 检索 Key 时可以使用临时环境变量 `REQUEST_AUTH_KEY`，避免命令行直接包含 Key；结果按日志记录返回，不把同一 Key 的所有请求合并。`trace` 先检索，再按解析后的指定字段复核，默认对每个连接分别建立关联。
 
+自动生成的追踪任务使用 `--connection` 和 `--resource` 限定具体 Topic/Workspace，并给出围绕事件时间的 `--start`、`--end`。手工 trace 也支持 `--resource`；无法匹配配置资源时失败，不扩大范围。`plan` 只生成任务、不联网；`--trace-all` 为所有事件要求追踪，已完成的追踪仍可复用。
+
 已有离线日志可用 `normalize --config ... --connection ... --input rows.json --output ...`。输入为原始行数组或 `{"rows": [...]}`。它不联网，且不能证明原始采集是否完整。
 
 查询输出包含 `sources`、`records`、`complete` 和时间范围。`records` 供 Agent 使用，可含完整授权及原文；公开消息使用 `render`/`send`。`event_id` 优先基于云端事件/行 ID；没有来源 ID 时使用来源和原始行指纹，并为同一查询中的完全相同记录分配序号。它不是虚构的请求 ID。
+
+查询、巡检、领取及本地处理结果同时提供首字段 `investigation`。Agent 必须解析完整的 `next_actions`，执行追踪并 enrich，再分析和发送；详细触发条件、状态与可直接使用的提示词见 [Agent 执行流程](agent-workflow.md)。
 
 退出码：0 表示命令完成；2 表示输入/查询/投递失败；3 表示云查询得到不完整结果。批量查询/巡检即使退出码为 2 或 3，已成功获取的记录仍写入输出，应读取结果再处理。
 
@@ -72,15 +78,15 @@ PYTHON scripts/cloud_logs.py render --input runtime/correlation.json --output ru
 
 ```text
 PYTHON scripts/cloud_logs.py scan --config assets/connections.example.json --env-file .env --output runtime/scan.json
-PYTHON scripts/cloud_logs.py render --input runtime/scan.json --state-dir ABSOLUTE_STATE_DIR --analysis-file runtime/analysis.json --output runtime/notification.txt
-PYTHON scripts/cloud_logs.py send --config assets/connections.example.json --env-file .env --channel feishu-alerts --input runtime/scan.json --analysis-file runtime/analysis.json
 ```
+
+读取 scan 的 `investigation.next_actions`，由 Agent 执行每项追踪，再按下面示例 enrich、分析、render、send。没有待执行任务时，可直接使用 scan.json 进入分析。`render` 原始 scan 只用于初步预览，`send` 会拒绝仍待追踪的事件。
 
 `render` 处理 `scan`/`claim` 输出时传入同一 `--state-dir`，以便从状态库读取授权 Key 的 HMAC 分组指纹并合并重复错误。直接渲染仍包含原始授权值的 query/normalize 结果时，无需该参数；通知只使用脱敏后的授权展示。
 
 `analysis-file` 可省略；没有分析时模板显示“暂无法确认原因”。Agent 补查原始记录后再分析；发布时用 `--secrets-input` 提供补查 JSON，可重复传入多个文件，使错误分析中的授权值也能统一遮挡。`render` 可同时传入 `--config`，识别自定义凭据环境变量。
 
-告警缺少路径、模型或错误详情时，先 trace，再保留原批次补全：
+按 investigation 执行 trace 后，保留原批次补全；失败、空结果及不完整的 trace JSON 也要作为 context：
 
 ```text
 PYTHON scripts/cloud_logs.py enrich --input runtime/scan.json --context runtime/trace-a.json --context runtime/trace-b.json --output runtime/enriched.json
@@ -88,7 +94,9 @@ PYTHON scripts/cloud_logs.py render --config assets/connections.example.json --e
 PYTHON scripts/cloud_logs.py send --config assets/connections.example.json --env-file .env --channel feishu-alerts --input runtime/enriched.json --analysis-file runtime/analysis.json --secrets-input runtime/trace-a.json --secrets-input runtime/trace-b.json
 ```
 
-enrich 不联网，保留所有事件和 delivery_id。它仅以同一连接、同一资源内的 request_id/trace_id/correlation_id 匹配上下文；不覆盖已知字段，不补入冲突值，不根据业务 ID 或同一 Key 猜测。补全后的 scan 仍不含完整授权和原始日志。字段来源证据保留在本地 associations 中，卡片错误分析保持简短。
+enrich 不联网，保留所有事件和 delivery_id。它仅以同一连接、同一资源内的 request_id/trace_id/correlation_id 匹配上下文，并核对查询范围覆盖事件时间。不覆盖原始已知字段；先前借用字段遇到新冲突会撤回。不根据业务 ID 或同一 Key 猜测。补全后的 scan 仍不含完整授权和原始日志。字段来源、脱敏上下文与错误证据保留在 associations 中，卡片错误分析保持简短。
+
+增量补全以最近的 enriched.json 为输入，保留已有证据与 trace_queries。过滤了 INFO/DEBUG 的上下文不算已完成追踪。全级别查询失败或截断会记为已尝试，Agent 按限制分析；成功查询覆盖旧失败范围后可替代旧状态。enrich 不修改队列 payload；保存 trace 文件可供重新领取后复用，必须使用新批次 delivery_id。
 
 `scan` 把符合级别规则的事件写入 SQLite 待发送队列，按事件指纹去重，然后领取一个批次。数据库保存已脱敏的诊断字段和状态目录专用的授权 HMAC 分组指纹，不保存原始请求/响应或授权 Key 明文。默认批次 100 条，可用 `--batch-size` 调整；默认租约 900 秒。历史未投递事件即使已离开当前查询窗口仍会重试。
 
@@ -100,7 +108,7 @@ enrich 不联网，保留所有事件和 delivery_id。它仅以同一连接、�
 PYTHON scripts/cloud_logs.py claim --config assets/connections.example.json --env-file .env --state-dir ABSOLUTE_STATE_DIR --output runtime/next-batch.json
 ```
 
-claim 只读取本地队列，不查询云端，也不要求云凭据。继续使用补查/分析/send 流程；available_count 为 0、发送失败或达到宿主运行时限时结束本轮，并保留未完成记录。不可把默认每批 100 条当成整轮只有 100 条。
+claim 只读取本地队列，不查询云端，也不要求云凭据。对新批次继续读取 investigation，追踪或复用有效上下文，再 enrich/分析/send；available_count 为 0、发送失败或达到宿主运行时限时结束本轮，并保留未完成记录。不可把默认每批 100 条当成整轮只有 100 条。
 
 使用宿主其他发送能力时，发送成功再手动确认：
 
@@ -123,8 +131,8 @@ PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-da
 
 定时任务由用户的 Agent 客户端或其他调度器创建，skill 不包含客户端专属调度文件。任务提示词明确：选哪些连接、查询窗口、运行频率、固定状态目录、飞书渠道、发送授权以及失败处理。宿主需能访问专属解释器、配置和环境变量。
 
-每轮执行 scan，读取成功和失败来源及 `checkpoint` 状态，必要时补查、enrich 并填写分析，调用 send，再用 claim 处理剩余队列。无新事件且无错误/不完整结果时保持安静；warning-only 且无事件时，`send` 不推送，但会在命令结果的 `warnings_not_sent` 中返回诊断。失败或不完整结果不能视为健康。自动 scan 从最近一个完整水位继续，显式时间范围不会改变该水位；如果自动范围一直不完整，应提高资源上限或手动拆分时间范围后补查。
+每轮执行 scan，读取成功和失败来源及 `checkpoint` 状态，完成 investigation 的追踪任务、enrich 并填写分析，调用 send，再用 claim 处理剩余队列。无新事件且无错误/不完整结果时保持安静；warning-only 且无事件时，`send` 不推送，但会在命令结果的 `warnings_not_sent` 中返回诊断。失败或不完整结果不能视为健康。自动 scan 从最近一个完整水位继续，显式时间范围不会改变该水位；如果自动范围一直不完整，应提高资源上限或手动拆分时间范围后补查。
 
 ## 本地验证
 
-在 skill 专属环境执行 `PYTHON -m unittest discover -s scripts/tests -v`。测试使用虚构凭据和模拟接口，不发送真实消息。新增服务先用真实样本执行 normalize，确认级别、时间、标识和错误字段，再验证实际只读查询；通知目标需在已有授权范围内。Windows 建议使用 `python.exe -X utf8` 运行外部检查工具，避免中文文件被系统默认编码误读。
+在仓库的 skill 专属环境执行 `PYTHON -m unittest discover -s scripts/tests -v`（分发 ZIP 不包含 tests）。测试使用虚构凭据和模拟接口，不发送真实消息。新增服务先用真实样本执行 normalize，确认级别、时间、标识和错误字段，再验证实际只读查询；通知目标需在已有授权范围内。Windows 建议使用 `python.exe -X utf8` 运行外部检查工具，避免中文文件被系统默认编码误读。

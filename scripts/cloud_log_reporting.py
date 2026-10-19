@@ -140,6 +140,7 @@ def public_record(record, extra_secrets=()):
 
 
 def _render_records(document, analyses=None, extra_secrets=()):
+    from cloud_log_workflow import plan_investigation
     analyses = analyses or {}
     records = document.get("alerts", document.get("records", []))
     default_association = document.get("association", {})
@@ -150,6 +151,11 @@ def _render_records(document, analyses=None, extra_secrets=()):
     timezone = document.get("output_timezone", "+00:00")
     mode_labels = {"identifier": "标识匹配", "business": "业务对象关联", "heuristic": "上下文推测", "context": "无法关联"}
     outcome_labels = {"success": "成功", "failed": "失败", "unknown": "未确认", "stream_error": "流处理异常"}
+    investigation = plan_investigation(document)
+    states = {item["event_id"]: item for item in investigation["events"]}
+    trace_labels = {"not_started": "待执行追踪（当前为初步预览）", "complete": "已完成所查范围查询",
+                    "partial": "追踪查询不完整", "failed": "追踪查询失败", "blocked": "缺少追踪定位信息",
+                    "not_required": "无自动追踪任务"}
     sections = []
     for record in records:
         association = associations.get(record["event_id"], default_association)
@@ -174,8 +180,18 @@ def _render_records(document, analyses=None, extra_secrets=()):
         values["authorization"] = mask(values["authorization"])
         values["operation_line"] = "操作类型：" + str(record["operation"]) + "\n" if record.get("operation") else ""
         values["response_label"] = record.get("response_label") or "服务"
-        values["error_message"] = record.get("error_message") or ("未记录" if record.get("error_code") else record.get("message")) or "未记录"
+        values["error_message"] = record.get("error_message") or "未记录"
+        values["trace_status"] = trace_labels.get(states.get(record["event_id"], {}).get("trace_status"), "未确认")
+        provenance = association.get("field_sources", {})
+        error_sources = {event_id for name in ("error_code", "error_type", "error_message")
+                         for event_id in provenance.get(name, [])}
+        evidence = [item for item in association.get("error_evidence", []) if item["event_id"] in error_sources]
+        values["error_source"] = ("关联日志：" + "、".join(dict.fromkeys(
+            item.get("event_type") or item.get("stage") or "事件" for item in evidence)) if evidence else
+            "当前记录" if any(record.get(name) for name in ("error_code", "error_type", "error_message")) else "尚无具体错误字段")
         if record.get("_notification_grouped"):
+            values["trace_status"] = record.get("_notification_trace_status", "各事件追踪状态分别保留")
+            values["error_source"] = "各事件错误证据分别保留"
             values["association_mode"] = "多条事件合并展示"
             values["association_evidence"] = "按相同服务、模型、授权 Key 和错误分组；不据此认定为同一请求"
             values["completeness"] = "每条请求链路完整性分别判断；此分组不提供链路证明"
@@ -190,7 +206,8 @@ def _render_records(document, analyses=None, extra_secrets=()):
             has_id = any(record.get(key) for key in ("request_id", "trace_id", "correlation_id"))
             values.update(association_mode="记录含标识，尚未扩展追踪" if has_id else "无法关联",
                           association_evidence="当前为单条日志事件",
-                          completeness="未确认完整链路", outcome="未确认")
+                          completeness="未确认完整链路",
+                          outcome=outcome_labels.get(record.get("outcome"), "未确认") if record.get("stage") == "completed" else "未确认")
         analysis = analyses.get(record["event_id"], {})
         certainty = {"confirmed": "", "suspected": "可能：", "unknown": "待确认："}.get(analysis.get("certainty"), "待确认：")
         values["judgment"] = certainty + analysis["judgment"] if analysis.get("judgment") else "暂无法确认原因"
@@ -246,7 +263,7 @@ def _group_key(record, association, analysis, fingerprints):
     model = _group_text(record.get("model"))
     authorization = _group_auth(record.get("authorization"), fingerprints, record.get("event_id"))
     error = (_group_error_text(record.get("error_code")), _group_error_text(record.get("error_type")),
-             _group_error_text(record.get("error_message") or record.get("message")))
+             _group_error_text(record.get("error_message")))
     if not model or not authorization or not any(error):
         return None
     association, analysis = association or {}, analysis or {}
@@ -284,7 +301,9 @@ def _time_range(records, timezone):
 
 def render(document, analyses=None, extra_secrets=(), group_fingerprints=None):
     """Merge equivalent alert presentation while leaving source events untouched."""
+    from cloud_log_workflow import plan_investigation
     analyses = analyses or {}
+    states = {item["event_id"]: item for item in plan_investigation(document)["events"]}
     group_fingerprints = group_fingerprints or {}
     field = "alerts" if "alerts" in document else "records"
     records = document.get(field, [])
@@ -321,6 +340,11 @@ def render(document, analyses=None, extra_secrets=(), group_fingerprints=None):
                 for item in group))
             record.update(
                 _notification_grouped=True,
+                _notification_trace_status="；".join(dict.fromkeys(
+                    {"not_started": "包含待执行追踪事件（初步预览）", "blocked": "包含定位信息不足事件",
+                     "complete": "已完成所查范围查询", "partial": "包含追踪查询不完整事件",
+                     "failed": "包含追踪查询失败事件", "not_required": "无自动追踪任务"}[
+                        states[item["event_id"]]["trace_status"]] for item in group)),
                 _notification_group_summary=(f"合并展示：{count} 条独立事件；时间范围：{_time_range(group, timezone)}；"
                                              f"涉及来源：{len(source_labels)} 个\n"),
                 _notification_source_summary="；".join(source_labels) or "未记录",

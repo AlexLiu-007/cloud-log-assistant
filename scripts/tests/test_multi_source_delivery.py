@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -14,13 +15,33 @@ from cloud_log_correlation import correlate
 from cloud_log_delivery import cards, channel_settings, send_document
 from cloud_log_parsing import normalize
 from cloud_log_reporting import render
-from cloud_log_state import enqueue_and_claim
+from cloud_log_state import enqueue_and_claim, load_authorization_fingerprints
 from providers import volcengine_tls as tls
 from test_cloud_logs import record, CONNECTION, START, END, TOKEN
 from test_skill_audit import invoke
 
 
 class MultiSourceTests(unittest.TestCase):
+    def test_matching_model_key_and_error_are_grouped_but_boundaries_are_not(self):
+        first = record(model='model-a', request_id='request-a')
+        second = record(model='model-a', request_id='request-b')
+        second['resource'] = 'another-topic'
+        text = render({'records':[first, second]})
+        self.assertIn('合并展示：2 条独立事件', text)
+        self.assertIn('another-topic', text)
+        self.assertIn('2 条独立事件（各 event_id 与回执逐条保留）', text)
+        self.assertNotIn('request-a', text)
+        self.assertNotIn('request-b', text)
+
+        for field, value in (('model', 'model-b'), ('authorization', 'Bearer another-key-987654'),
+                             ('error_message', 'A different error'), ('stage', 'upstream'),
+                             ('outcome', 'failed')):
+            with self.subTest(field=field):
+                left = dict(first)
+                right = dict(second)
+                right[field] = value
+                self.assertNotIn('合并展示：', render({'records':[left, right]}))
+
     def test_two_clouds_share_one_card(self):
         rows=[record(marker='azure'), record(marker='tls')]
         rows[0].update(connection_id='azure-ai',resource='workspace-a',environment='.ai')
@@ -100,6 +121,33 @@ class MultiBotTests(unittest.TestCase):
     CONFIG={'notifications':{'test':{'provider':'feishu'}}}
     BOTS=[{'webhook':'https://open.feishu.cn/open-apis/bot/v2/hook/first','secret':'one'},
           {'webhook':'https://open.feishu.cn/open-apis/bot/v2/hook/second','secret':'two'}]
+
+    def test_send_groups_display_but_keeps_each_event_and_receipt(self):
+        rows = [record(model='model-a', request_id='request-a'),
+                record(model='model-a', request_id='request-b')]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'FEISHU_WEBHOOK':self.BOTS[0]['webhook']}, clear=True), \
+                patch('cloud_log_delivery.post') as post:
+            document = {'kind':'scan', **enqueue_and_claim(directory, rows, ['example'])}
+            event_ids = [row['event_id'] for row in document['alerts']]
+            fingerprints = load_authorization_fingerprints(directory, event_ids)
+            self.assertEqual(len(set(fingerprints.values())), 1)
+            sent = send_document(self.CONFIG, 'test', document, {}, directory)
+
+            payload_text = json.dumps(post.call_args.args[2], ensure_ascii=False)
+            self.assertIn('合并展示：2 条独立事件', payload_text)
+            self.assertNotIn(TOKEN, payload_text)
+            self.assertEqual(sent['acknowledged_events'], 2)
+
+            database = sqlite3.connect(Path(directory) / 'outbox.sqlite3')
+            try:
+                persisted = database.execute('SELECT event_id, payload FROM events').fetchall()
+                receipts = database.execute('SELECT event_id FROM target_receipts').fetchall()
+            finally:
+                database.close()
+            self.assertEqual({event_id for event_id, _ in persisted}, set(event_ids))
+            self.assertNotIn(TOKEN, json.dumps([payload for _, payload in persisted]))
+            self.assertEqual({event_id for (event_id,) in receipts}, set(event_ids))
 
     def test_every_configured_bot_receives_same_combined_card(self):
         document={'records':[record(marker=1),record(marker=2)]}

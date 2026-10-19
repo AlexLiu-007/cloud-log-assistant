@@ -26,24 +26,51 @@ def open_store(directory):
         raise LogError("state-dir 必须是固定的绝对路径")
     path.mkdir(parents=True, exist_ok=True)
     database = sqlite3.connect(path / "outbox.sqlite3", timeout=30)
-    database.execute("PRAGMA journal_mode=WAL")
-    database.execute("""CREATE TABLE IF NOT EXISTS events (
-        event_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, payload TEXT NOT NULL,
-        created REAL NOT NULL, sent REAL, delivery_id TEXT, lease_until REAL,
-        sending INTEGER NOT NULL DEFAULT 0, authorization_fingerprint TEXT)""")
-    event_columns = {row[1] for row in database.execute("PRAGMA table_info(events)")}
-    if "authorization_fingerprint" not in event_columns:
-        database.execute("ALTER TABLE events ADD COLUMN authorization_fingerprint TEXT")
-    database.execute("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    database.execute("""CREATE TABLE IF NOT EXISTS target_receipts (
-        event_id TEXT NOT NULL, destination TEXT NOT NULL, sent REAL NOT NULL,
-        PRIMARY KEY(event_id, destination))""")
-    database.execute("""CREATE TABLE IF NOT EXISTS scan_cursors (
-        connection_id TEXT NOT NULL, scope_hash TEXT NOT NULL, next_start REAL NOT NULL,
-        updated REAL NOT NULL, PRIMARY KEY(connection_id, scope_hash))""")
-    database.execute("CREATE INDEX IF NOT EXISTS unsent_events ON events(sent, lease_until, created)")
-    database.commit()
-    return database
+    try:
+        database.execute("PRAGMA journal_mode=WAL")
+        with database:
+            database.execute("BEGIN IMMEDIATE")
+            database.execute("""CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, payload TEXT NOT NULL,
+                created REAL NOT NULL, sent REAL, delivery_id TEXT, lease_until REAL,
+                sending INTEGER NOT NULL DEFAULT 0, authorization_fingerprint TEXT)""")
+            event_columns = {row[1] for row in database.execute("PRAGMA table_info(events)")}
+            if "authorization_fingerprint" not in event_columns:
+                database.execute("ALTER TABLE events ADD COLUMN authorization_fingerprint TEXT")
+            for name, declaration in (("notify_after", "REAL NOT NULL DEFAULT 0"),
+                                      ("notification_payload", "TEXT"), ("notification_group", "TEXT")):
+                if name not in event_columns:
+                    database.execute(f"ALTER TABLE events ADD COLUMN {name} {declaration}")
+            database.execute("CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            database.execute("""CREATE TABLE IF NOT EXISTS target_receipts (
+                event_id TEXT NOT NULL, destination TEXT NOT NULL, sent REAL NOT NULL,
+                PRIMARY KEY(event_id, destination))""")
+            database.execute("""CREATE TABLE IF NOT EXISTS scan_cursors (
+                connection_id TEXT NOT NULL, scope_hash TEXT NOT NULL, next_start REAL NOT NULL,
+                updated REAL NOT NULL, PRIMARY KEY(connection_id, scope_hash))""")
+            database.execute("CREATE INDEX IF NOT EXISTS unsent_events ON events(sent, lease_until, created)")
+            database.execute("CREATE INDEX IF NOT EXISTS notification_group_events ON events(notification_group, sent)")
+            database.execute("""CREATE TABLE IF NOT EXISTS notification_history (
+                destination TEXT NOT NULL, group_id TEXT NOT NULL, last_sent REAL NOT NULL, level INTEGER NOT NULL,
+                PRIMARY KEY(destination,group_id))""")
+            database.execute("""CREATE TABLE IF NOT EXISTS notification_deferrals (
+                event_id TEXT NOT NULL, destination TEXT NOT NULL, group_id TEXT NOT NULL, ready_at REAL NOT NULL,
+                PRIMARY KEY(event_id,destination))""")
+            database.execute("""CREATE TABLE IF NOT EXISTS notification_plans (
+                plan_id TEXT PRIMARY KEY, destination TEXT NOT NULL, payloads TEXT NOT NULL, event_ids TEXT NOT NULL,
+                groups_json TEXT NOT NULL, next_part INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0,
+                created REAL NOT NULL, report_id TEXT)""")
+            if "report_id" not in {row[1] for row in database.execute("PRAGMA table_info(notification_plans)")}:
+                database.execute("ALTER TABLE notification_plans ADD COLUMN report_id TEXT")
+            database.execute("""CREATE TABLE IF NOT EXISTS notification_plan_events (
+                plan_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(plan_id,event_id))""")
+            database.execute("CREATE INDEX IF NOT EXISTS notification_event_plans ON notification_plan_events(event_id)")
+            database.execute("CREATE INDEX IF NOT EXISTS notification_open_plans ON notification_plans(complete,created)")
+            database.execute("CREATE INDEX IF NOT EXISTS notification_due_events ON events(sent,notify_after,created)")
+        return database
+    except Exception:
+        database.close()
+        raise
 
 
 def _authorization_value(value):
@@ -107,21 +134,43 @@ def enqueue_and_claim(directory, records, connection_ids, lease_seconds=900, bat
                         "UPDATE events SET authorization_fingerprint=COALESCE(authorization_fingerprint, ?) "
                         "WHERE event_id=?", (fingerprint, record["event_id"]))
             placeholders = ",".join("?" for _ in connection_ids)
-            rows = database.execute(
-                f"SELECT event_id, payload FROM events WHERE sent IS NULL AND (lease_until IS NULL OR lease_until < ?) "
-                f"AND connection_id IN ({placeholders}) ORDER BY created, event_id LIMIT ?",
-                (now, *connection_ids, batch_size)).fetchall()
-            for event_id, _ in rows:
+            from cloud_log_notify_state import frozen_claim
+            rows, _ = frozen_claim(database, connection_ids, now)
+            if not rows:
+                rows = database.execute(
+                    f"SELECT event_id, payload, notification_payload FROM events WHERE sent IS NULL "
+                    f"AND notify_after<=? AND (lease_until IS NULL OR lease_until < ?) "
+                    f"AND NOT EXISTS (SELECT 1 FROM notification_plan_events pe JOIN notification_plans p "
+                    f"ON pe.plan_id=p.plan_id WHERE pe.event_id=events.event_id AND p.complete=0) "
+                    f"AND connection_id IN ({placeholders}) ORDER BY created, event_id LIMIT ?",
+                    (now, now, *connection_ids, batch_size)).fetchall()
+            for event_id, _, _ in rows:
                 database.execute("UPDATE events SET delivery_id=?, lease_until=?, sending=0 WHERE event_id=?",
                                  (delivery_id, now + lease_seconds, event_id))
             pending = database.execute(
                 f"SELECT COUNT(*) FROM events WHERE sent IS NULL AND connection_id IN ({placeholders})", connection_ids).fetchone()[0]
             available = database.execute(
-                f"SELECT COUNT(*) FROM events WHERE sent IS NULL AND (lease_until IS NULL OR lease_until < ?) "
-                f"AND connection_id IN ({placeholders})", (now, *connection_ids)).fetchone()[0]
+                f"SELECT COUNT(*) FROM events WHERE sent IS NULL AND notify_after<=? AND (lease_until IS NULL OR lease_until < ?) "
+                f"AND NOT EXISTS (SELECT 1 FROM notification_plan_events pe JOIN notification_plans p "
+                f"ON pe.plan_id=p.plan_id WHERE pe.event_id=events.event_id AND p.complete=0) "
+                f"AND connection_id IN ({placeholders})", (now, now, *connection_ids)).fetchone()[0]
+            retry_rows, _ = frozen_claim(database, connection_ids, now)
+            available += len(retry_rows)
+            deferred = database.execute(
+                f"SELECT COUNT(*), MIN(notify_after) FROM events WHERE sent IS NULL AND notify_after>? "
+                f"AND connection_id IN ({placeholders})", (now, *connection_ids)).fetchone()
+        alerts, associations, analyses = [], [], {}
+        for event_id, payload, saved in rows:
+            context = json.loads(saved) if saved else {}
+            alerts.append(context.get("record", json.loads(payload)))
+            if context.get("association"):
+                associations.append({**context["association"], "event_ids": [event_id]})
+            if context.get("analysis"):
+                analyses[event_id] = context["analysis"]
         return {"delivery_id": delivery_id if rows else None, "lease_seconds": lease_seconds,
-                "alerts": [json.loads(payload) for _, payload in rows], "pending_count": pending,
-                "available_count": available}
+                "alerts": alerts, "associations": associations, "notification_analyses": analyses,
+                "pending_count": pending, "available_count": available,
+                "deferred_count": deferred[0], "next_notification_at": deferred[1]}
     finally:
         database.close()
 
@@ -176,6 +225,12 @@ def purge_sent(directory, retention_days):
     cutoff = time.time() - retention_days * 86400
     try:
         with database:
+            database.execute("DELETE FROM notification_deferrals WHERE event_id IN "
+                             "(SELECT event_id FROM events WHERE sent IS NOT NULL AND sent < ?)", (cutoff,))
+            database.execute("DELETE FROM notification_plan_events WHERE plan_id IN "
+                             "(SELECT plan_id FROM notification_plans WHERE complete=1 AND created < ?)", (cutoff,))
+            database.execute("DELETE FROM notification_plans WHERE complete=1 AND created < ?", (cutoff,))
+            database.execute("DELETE FROM notification_history WHERE last_sent < ?", (cutoff,))
             database.execute(
                 "DELETE FROM target_receipts WHERE event_id IN "
                 "(SELECT event_id FROM events WHERE sent IS NOT NULL AND sent < ?)", (cutoff,))

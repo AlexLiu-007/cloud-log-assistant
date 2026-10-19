@@ -181,7 +181,7 @@ class PluginProfileTests(unittest.TestCase):
         self.assertIn('plugin-topic', text)
         self.assertIn('gateway-topic', text)
         self.assertIn('操作类型：CreateAsset', text)
-        self.assertIn('响应状态：服务 ', text)
+        self.assertIn('响应状态：上游 400', text)
         self.assertEqual(len(cards(text,'test')), 1)
 
     def test_profile_flags_and_payload_rules_validate(self):

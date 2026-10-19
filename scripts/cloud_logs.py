@@ -302,6 +302,10 @@ def main():
     command.add_argument("--output")
     command.add_argument("--trace-all", action="store_true", default=None)
     command.add_argument("--trace-window-seconds", type=int)
+    command = sub.add_parser("report", help="Read a redacted notification detail report")
+    command.add_argument("--state-dir", required=True)
+    command.add_argument("--report-id", required=True)
+    command.add_argument("--output")
     for name in ("ack", "release"):
         command = sub.add_parser(name)
         command.add_argument("--state-dir")
@@ -461,7 +465,10 @@ def main():
                 secrets |= collect_secrets(read_json(path))
         result = send_document(config, args.channel, document,
                                read_json(args.analysis_file) if args.analysis_file else {},
-                               state_dir(args) if document.get("delivery_id") else None, secrets)
+                                state_dir(args) if document.get("delivery_id") or args.state_dir else None, secrets)
+    elif args.command == "report":
+        from cloud_log_notify_state import read_report
+        result = read_report(args.state_dir, args.report_id)
     elif args.command == "purge":
         result = purge_sent(state_dir(args), args.retention_days)
     else:

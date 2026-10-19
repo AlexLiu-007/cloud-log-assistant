@@ -107,7 +107,7 @@ enrich 不联网，保留所有事件和 delivery_id。它仅以同一连接、�
 
 `scan` 把符合级别规则的事件写入 SQLite 待发送队列，按事件指纹去重，然后领取一个批次。数据库保存已脱敏的诊断字段和状态目录专用的授权 HMAC 分组指纹，不保存原始请求/响应或授权 Key 明文。默认批次 100 条，可用 `--batch-size` 调整；默认租约 900 秒。历史未投递事件即使已离开当前查询窗口仍会重试。
 
-`send` 在同一批次中将同服务、模型、授权 Key、错误阶段和结果/状态一致的事件合并展示，并向渠道配置的全部机器人发送。来源、事件数和时间范围会显示在汇总中；合并不改变队列中的原始事件，也不把多条日志推断为同一请求。一个机器人失败会继续尝试其他机器人；队列为每个事件保存各目标的成功回执，重试跳过已完成的目标。全部目标成功才确认事件；失败释放租约。发送期间逐段续租，避免长批次租约过期后被重复领取。没有事件、没有来源异常时保持安静。单个机器人内部多段消息部分成功后的重试仍可能重复片段；Webhook 无法保证恰好一次投递。
+`send` 按 Agent 的有效分类或一致的具体错误字段，在相同服务、模型、Key、上游及已知结果/状态等范围内合并。自然语言分析措辞不参与分组。首次、新问题、级别上升和达到阈值时提醒；重复事件可延后汇总，保持待发。每个目标保存事件回执及冻结的卡片分段进度；失败重新 claim 后继续下一段。每条事件的全部目标确认后才最终标记已发送。网络结果不确定的片段重试仍可能重复；Webhook 无法保证恰好一次。详见通知文档。
 
 `pending_count` 包含已领取及未领取的待发事件，`available_count` 是还可领取的数量。成功发送当前批次后，继续处理可领取事件：
 
@@ -143,3 +143,11 @@ PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-da
 ## 本地验证
 
 在仓库用 Python 3.10+ 执行 `PYTHON -m unittest discover -s scripts/tests -v`（分发 ZIP 不包含 tests）。可加 `-S` 禁止加载第三方 site-packages，验证免依赖运行。测试使用虚构凭据和模拟接口，不发送真实消息。新增服务先用样本执行 normalize，再按授权验证只读查询；通知目标需在已有授权范围内。Windows 建议加 `-X utf8`，避免中文被系统默认编码误读。
+
+## 通知分类、延后和详情
+
+Agent 的可选 classification 字段见 [分类协议](notification-classification.md)，跨轮次提醒和投递规则见 [通知文档](notifications.md)。每个飞书渠道默认 repeat_interval_seconds=900、repeat_escalation_count=100，可设 0 关闭对应功能。策略只在持久队列的内置 send 上生效。
+
+scan/claim 的 available_count 不含正在等待通知窗口的事件；deferred_count 和 next_notification_at 显示等待量与最早时间。到期需要宿主已有调度再次调用 scan/claim。保存的通知上下文已脱敏，claim 可携带 notification_analyses；新 enrich 会清除旧分析。失败重试时按原连接范围领取，未完成的卡片计划可能要求领取超过当前 batch-size 的完整事件集合。
+
+读取卡片详情：`PYTHON scripts/cloud_logs.py report --state-dir ABSOLUTE_STATE_DIR --report-id CARD_REPORT_ID`。详情存于状态目录 reports/，不包含 raw，已统一脱敏；按宿主日志保留策略管理。

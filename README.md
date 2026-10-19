@@ -12,7 +12,9 @@
 - 按服务规则解析日志，关联请求与任务，补查上下文并标明证据或不确定性。
 - 通过 `investigation.next_actions` 指挥 Agent 继续追踪；初次扫描没有错误详情时，补查包含 INFO、DEBUG 的同请求日志。
 - 将巡检事件写入本地持久队列，并通过飞书自定义机器人发送合并告警。
-- 通知按相同服务、模型、授权 Key 和错误合并展示；每条底层事件及投递回执仍独立保存。
+- Agent 根据证据判断错误分类；脚本验证分类，在相同服务、环境、模型、Key 和上游等范围内合并通知，分析措辞不影响分组。
+- 飞书采用精简卡片，详情按编号查询；日志、模型生成的摘要和建议均由 Python 脱敏。
+- 同组新日志默认延后至上次发送后 15 分钟汇总；新问题、级别上升或待发数量达到阈值时提前提醒。延后事件保持待发，分段失败可继续原卡片进度。
 - 使用环境变量提供凭据；通知输出会遮挡授权 Key。
 - 可扩展其他云日志服务和服务日志格式。
 
@@ -47,7 +49,7 @@ PYTHON scripts/cloud_logs.py query --config assets/connections.json --env-file .
 
 ## Agent 运行流程
 
-`scan/query → 读取 investigation → Agent 执行 trace → enrich → Agent 分析 → render → 按授权 send`
+`scan/query → 读取 investigation → Agent 执行 trace → enrich → Agent 分类与分析 → Skill 脱敏渲染 → 按授权 send`
 
 追踪任务限定具体连接、Topic/Workspace 和异常发生时间附近的范围。空结果、失败和截断结果也要 enrich，避免无限重复查询。错误证据与链路完整性分别判断；普通完成日志不会代替具体错误。`send` 会拒绝仍有未执行追踪任务的批次。完整协议与可复制的 Agent 提示词见 [Agent 执行流程](references/agent-workflow.md)。
 
@@ -69,6 +71,7 @@ PYTHON scripts/package_skill.py
 - [Agent 执行流程与运行提示词](references/agent-workflow.md)
 - [日志关联规则](references/correlation.md)
 - [告警格式与通知渠道](references/notifications.md)
+- [Agent 错误分类协议](references/notification-classification.md)
 - [接入扩展服务](references/extending.md)
 - [Azure Log Analytics](references/azure.md) · [火山引擎 TLS](references/volcengine.md) · [plugin-api 日志规则](references/plugin-api.md)
 
@@ -76,6 +79,8 @@ PYTHON scripts/package_skill.py
 
 不要把真实凭据提交到仓库。`.env`、虚拟环境和 `runtime/` 中的查询结果、状态数据库及预览文件已列入 `.gitignore`。查询结果可能包含原始日志及完整授权字段，应只在本地分析；对外告警请使用 `render` 或 `send` 生成的脱敏内容。
 
-定时巡检由宿主 Agent 或其他调度器负责；本 Skill 不会自行创建定时任务或常驻轮询。
+定时巡检和到期汇总由宿主 Agent 或其他已有调度器驱动；本 Skill 不会自行创建定时任务或常驻轮询。渠道设置 repeat_interval_seconds（默认 900，0 关闭）和 repeat_escalation_count（默认 100 条待发日志，0 关闭阈值）；这些策略适用于持久队列的内置 send。
+
+available_count=0 时结束本轮，即使 deferred_count/pending_count 非零也不反复 claim。读取卡片详情：`PYTHON scripts/cloud_logs.py report --state-dir ABSOLUTE_STATE_DIR --report-id CARD_REPORT_ID`。完整规则及局限见通知文档。
 
 无显式时间参数的 `scan` 会在状态目录中保存完成水位，失败或截断时下次重查该时间段。已确认的队列记录默认保留；需要按保留策略清理时，使用 `PYTHON scripts/cloud_logs.py purge --state-dir ABSOLUTE_STATE_DIR --retention-days 90`。

@@ -145,5 +145,7 @@ def enrich(document, contexts):
     result[key] = enriched
     result["associations"] = associations
     result["enriched"] = True
+    # New evidence requires the agent to reconsider any saved notification analysis.
+    result.pop("notification_analyses", None)
     result["investigation"] = plan_investigation(result)
     return result

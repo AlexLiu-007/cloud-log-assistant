@@ -15,6 +15,7 @@ from cloud_log_correlation import correlate
 from cloud_log_delivery import cards, channel_settings, send_document
 from cloud_log_parsing import normalize
 from cloud_log_reporting import render
+from cloud_log_grouping import notification_groups
 from cloud_log_state import enqueue_and_claim, load_authorization_fingerprints
 from providers import volcengine_tls as tls
 from test_cloud_logs import record, CONNECTION, START, END, TOKEN
@@ -27,20 +28,20 @@ class MultiSourceTests(unittest.TestCase):
         second = record(model='model-a', request_id='request-b')
         second['resource'] = 'another-topic'
         text = render({'records':[first, second]})
-        self.assertIn('合并展示：2 条独立事件', text)
+        self.assertIn('2 条异常日志', text)
         self.assertIn('another-topic', text)
-        self.assertIn('2 条独立事件（各 event_id 与回执逐条保留）', text)
+        self.assertEqual(len(notification_groups({'records':[first, second]})[0]['records']), 2)
         self.assertNotIn('request-a', text)
         self.assertNotIn('request-b', text)
 
         for field, value in (('model', 'model-b'), ('authorization', 'Bearer another-key-987654'),
-                             ('error_message', 'A different error'), ('stage', 'upstream'),
+                             ('error_message', 'A different error'), ('upstream_provider', 'other'),
                              ('outcome', 'failed')):
             with self.subTest(field=field):
                 left = dict(first)
                 right = dict(second)
                 right[field] = value
-                self.assertNotIn('合并展示：', render({'records':[left, right]}))
+                self.assertEqual(len(notification_groups({'records':[left, right]})), 2)
 
     def test_two_clouds_share_one_card(self):
         rows=[record(marker='azure'), record(marker='tls')]
@@ -61,13 +62,13 @@ class MultiSourceTests(unittest.TestCase):
         self.assertIn('test', result[0]['card']['header']['title']['content'])
 
     def test_large_batch_splits_only_for_capacity(self):
-        rows=[record(marker=i) for i in range(20)]
+        rows=[record(marker=i, error_message=f'Distinct error {i}') for i in range(20)]
         result=cards(render({'records':rows}),'test')
         self.assertGreater(len(result),1)
         self.assertLess(len(result),len(rows))
         payload=json.dumps(result,ensure_ascii=False)
         for row in rows:
-            self.assertIn(row['event_id'],payload)
+            self.assertIn(row['error_message'],payload)
         for card in result:
             self.assertLess(len(json.dumps(card,ensure_ascii=False).encode()),18500)
             self.assertLessEqual(len(card['card']['elements']),40)
@@ -135,7 +136,7 @@ class MultiBotTests(unittest.TestCase):
             sent = send_document(self.CONFIG, 'test', document, {}, directory)
 
             payload_text = json.dumps(post.call_args.args[2], ensure_ascii=False)
-            self.assertIn('合并展示：2 条独立事件', payload_text)
+            self.assertIn('2 条异常日志', payload_text)
             self.assertNotIn(TOKEN, payload_text)
             self.assertEqual(sent['acknowledged_events'], 2)
 

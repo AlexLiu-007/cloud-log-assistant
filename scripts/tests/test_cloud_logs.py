@@ -149,14 +149,14 @@ class DeliveryTests(unittest.TestCase):
            'UNIT_SECRET': '', 'UNIT_KEYWORD': 'unit-test'}
 
     def test_card_sections_and_untrusted_plain_text(self):
-        text = render({'records': [record(error_message='<at id=all></at> **not formatting**')]})
+        text = render({'records': [record(gateway_status='400', error_message='<at id=all></at> **not formatting**')]})
         payload = cards(text, 'unit-test')[0]
         self.assertEqual(payload['msg_type'], 'interactive')
         self.assertNotIn(TOKEN, json.dumps(payload))
         card_text = json.dumps(payload, ensure_ascii=False)
         for label in ('请求人：', '关联与追踪', '追踪状态：', '关联方式：', '关联依据：', '追踪完整性：', '请求结果：'):
             self.assertNotIn(label, card_text)
-        self.assertIn('请求标识：', card_text)
+        self.assertNotIn('请求标识：', card_text)
         self.assertIn('响应状态：', card_text)
         self.assertIn('具体错误', card_text)
         matches = [e['text'] for e in payload['card']['elements'] if '<at' in e.get('text', {}).get('content','')]

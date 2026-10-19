@@ -10,7 +10,9 @@
       "webhook_env": "FEISHU_WEBHOOK",
       "secret_env": "FEISHU_SECRET",
       "keyword_env": "FEISHU_KEYWORD",
-      "timeout_seconds": 30
+      "timeout_seconds": 30,
+      "repeat_interval_seconds": 900,
+      "repeat_escalation_count": 100
     }
   },
   "connections": [

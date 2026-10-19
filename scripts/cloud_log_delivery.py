@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 from cloud_log_common import LogError, digest, env_setting
 from cloud_log_reporting import redact_text, render
-from cloud_log_state import (begin_send, confirm_target, load_authorization_fingerprints,
+from cloud_log_state import (begin_send, load_authorization_fingerprints,
                              pending_for_target, receipt, renew_send)
 
 
@@ -56,6 +56,8 @@ def channel_settings(channel):
             raise LogError("飞书配置中同一个 Webhook 重复，需去除重复项")
         seen.add(webhook.strip())
         targets.append({"webhook": webhook.strip(), "secret": secret.strip(), "id": digest(webhook.strip())})
+    from cloud_log_notify_state import settings
+    settings(channel)
     timeout = channel.get("timeout_seconds", 30)
     if type(timeout) is not int or not 1 <= timeout <= 300:
         raise LogError("飞书 timeout_seconds 需要 1 到 300 的整数")
@@ -166,71 +168,114 @@ def post(webhook, secret, payload, timeout):
 
 
 def send_document(config, channel_id, document, analyses, directory=None, secrets=()):
+    from pathlib import Path
+    from cloud_log_grouping import notification_groups
+    from cloud_log_notify_state import (active_plans, confirm_part, create_plan, finish_delivery,
+                                       save_report, select_due, settings, snapshots)
+    from cloud_log_reporting import collect_secrets
     from cloud_log_workflow import plan_investigation
-    if plan_investigation(document)["next_actions"]:
+    investigation = plan_investigation(document)
+    if investigation["next_actions"]:
         raise LogError("存在尚未执行的追踪任务；先执行 investigation.next_actions，再用 enrich 合并结果（包括空结果或查询失败）。预览请用 render")
     channel = config.get("notifications", {}).get(channel_id)
     if not channel:
         raise LogError("通知渠道不存在：" + channel_id)
+    policy = settings(channel)
     records = document.get("alerts", document.get("records", []))
     diagnostics = document.get("complete") is False or any(
         source.get("error") or source.get("status") == "failed" or source.get("complete") is False
         for source in document.get("sources", []))
     if not records and not diagnostics:
-        warnings = []
-        for source in document.get("sources", []):
-            label = " / ".join(str(source[key]) for key in ("provider", "connection_id", "resource")
-                               if source.get(key))
-            warnings.extend(redact_text((label + "：" if label else "") + str(warning), secrets)
-                            for warning in source.get("warnings", []))
+        warnings = [redact_text(str(warning), secrets) for source in document.get("sources", [])
+                    for warning in source.get("warnings", [])]
         return {"channel": channel_id, "sent_messages": 0, "reason": "no_findings",
                 "warnings_not_sent": list(dict.fromkeys(warnings))}
     targets, keyword, timeout = channel_settings(channel)
     secrets = set(secrets) | {t[key] for t in targets for key in ("webhook", "secret") if t[key]}
+    secrets |= collect_secrets(document) | collect_secrets(analyses)
     keyword = redact_text(keyword, secrets)
     delivery_id = document.get("delivery_id")
     if document.get("kind") == "scan" and records and not delivery_id:
         raise LogError("巡检事件缺少 delivery_id，不能跳过投递确认流程")
+    if delivery_id and not directory:
+        raise LogError("投递巡检批次需要对应的状态目录")
+    if directory and not Path(directory).is_absolute():
+        raise LogError("state-dir 必须是固定的绝对路径")
+    fingerprints = load_authorization_fingerprints(directory, [r["event_id"] for r in records]) if delivery_id else {}
+    groups = notification_groups(document, analyses, fingerprints)
+    analyses = {**document.get("notification_analyses", {}), **(analyses or {})}
+    report_id = save_report(directory, document, analyses, groups, secrets) if directory else None
+    document = deepcopy(document)
+    if report_id:
+        document["notification_report_id"] = report_id
     if delivery_id:
-        if not directory:
-            raise LogError("投递巡检批次需要对应的状态目录")
         begin_send(directory, delivery_id, [r["event_id"] for r in records], digest(["channel", channel_id]),
                    previous_destinations=[digest([channel_id, t["webhook"]]) for t in targets])
-    sent, results, failures = 0, [], []
+        try:
+            snapshots(directory, delivery_id, groups, secrets)
+        except Exception:
+            receipt(directory, delivery_id, False)
+            raise
+    states = {item["event_id"]: item for item in investigation["events"]}
+    for group in groups:
+        group["cooldown_eligible"] = all(
+            states[row["event_id"]]["trace_status"] in {"complete", "not_required"}
+            and states[row["event_id"]]["error_evidence_status"] != "conflicting"
+            for row in group["records"])
+    sent, results, failures, reports_used = 0, [], [], []
     for index, target in enumerate(targets, 1):
         target_sent = 0
         try:
-            pending = pending_for_target(directory, [r["event_id"] for r in records], target["id"]) if delivery_id else None
-            target_document = deepcopy(document)
-            target_records = [r for r in records if pending is None or r["event_id"] in pending]
-            target_document["alerts" if "alerts" in document else "records"] = target_records
-            if delivery_id and not target_records:
+            pending = pending_for_target(directory, [r["event_id"] for r in records], target["id"]) if delivery_id else {r["event_id"] for r in records}
+            if delivery_id and not pending:
                 results.append({"target": index, "status": "already_delivered", "sent_messages": 0})
                 continue
-            fingerprints = (load_authorization_fingerprints(directory, [r["event_id"] for r in target_records])
-                            if delivery_id else {})
-            parts = cards(render(target_document, analyses, secrets, fingerprints), keyword)
-            for part in parts:
-                if delivery_id:
-                    renew_send(directory, delivery_id, len(records))
-                post(target["webhook"], target["secret"], part, timeout)
-                target_sent += 1
-                sent += 1
-                if target_sent < len(parts):
-                    time.sleep(0.7)
-            if delivery_id:
-                confirm_target(directory, delivery_id, [r["event_id"] for r in target_records], target["id"])
-            results.append({"target": index, "status": "delivered", "sent_messages": target_sent})
+            plans = active_plans(directory, target["id"], pending) if delivery_id else []
+            frozen_ids = {event_id for plan in plans for event_id in plan["event_ids"]}
+            target_groups = []
+            for group in groups:
+                rows = [row for row in group["records"] if row["event_id"] in pending - frozen_ids]
+                if rows:
+                    target_groups.append({**group, "records": rows})
+            due, delayed = (select_due(directory, target["id"], target_groups, policy, diagnostics)
+                            if delivery_id else (target_groups, []))
+            if due or (diagnostics and not plans):
+                target_document = deepcopy(document)
+                included = {row["event_id"] for group in due for row in group["records"]}
+                target_document["alerts" if "alerts" in document else "records"] = [r for r in records if r["event_id"] in included]
+                target_document["associations"] = [g for g in document.get("associations", []) if set(g.get("event_ids", [])) & included]
+                parts = cards(render(target_document, analyses, secrets, fingerprints,
+                                     allow_truncation=bool(report_id)), keyword)
+                plans.append(create_plan(directory, target["id"], due, parts, report_id) if delivery_id and due else
+                             {"parts": parts, "next_part": 0, "event_ids": [], "report_id": report_id})
+            for plan in plans:
+                if plan.get("report_id"):
+                    reports_used.append(plan["report_id"])
+                for part_index in range(plan["next_part"], len(plan["parts"])):
+                    if delivery_id:
+                        renew_send(directory, delivery_id, len(records))
+                    post(target["webhook"], target["secret"], plan["parts"][part_index], timeout)
+                    target_sent += 1
+                    sent += 1
+                    if delivery_id and plan.get("id"):
+                        confirm_part(directory, delivery_id, target["id"], plan, part_index)
+                    if part_index + 1 < len(plan["parts"]):
+                        time.sleep(0.7)
+            results.append({"target": index, "status": "deferred" if delayed and not target_sent else
+                            "delivered_with_deferred" if delayed else "delivered",
+                            "sent_messages": target_sent, "deferred_events": len(delayed)})
         except Exception as exc:
-            reason = str(exc) if isinstance(exc, LogError) else type(exc).__name__
+            reason = redact_text(str(exc), secrets) if isinstance(exc, LogError) else type(exc).__name__
             failures.append(f"目标 {index} 已确认 {target_sent} 段：{reason}")
     if failures:
         if delivery_id:
             receipt(directory, delivery_id, False)
         raise LogError(f"飞书投递未完成，{len(results)}/{len(targets)} 个目标完成；" + "；".join(failures) +
-                       "。已完成目标会跳过；未完成目标重试可能重复已发送片段")
-    acknowledged = receipt(directory, delivery_id, True)["affected"] if delivery_id else 0
-    if delivery_id and acknowledged != len(records):
-        raise LogError("飞书已接收消息，但本地确认数量不符；检查投递状态，避免盲目重发")
-    return {"channel": channel_id, "message_format": "interactive", "sent_messages": sent, "delivery_id": delivery_id,
-            "acknowledged_events": acknowledged, "targets": results}
+                       "。重新 claim 后继续已保存的卡片分段；网络结果不确定的片段仍可能重复")
+    completion = (finish_delivery(directory, delivery_id, [target["id"] for target in targets]) if delivery_id else
+                  {"acknowledged_events": 0, "deferred_events": 0, "next_notification_at": None})
+    return {"channel": channel_id, "message_format": "interactive", "sent_messages": sent,
+            "delivery_id": delivery_id, **completion, "targets": results,
+            "report_id": reports_used[0] if reports_used else report_id,
+            "report_ids": list(dict.fromkeys(reports_used or ([report_id] if report_id else []))),
+            "classification_issues": {event_id: issue for group in groups for event_id, issue in group["classification_issues"].items()}}

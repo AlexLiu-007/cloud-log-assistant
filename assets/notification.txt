@@ -1,22 +1,8 @@
-日志告警｜${service}｜${environment}
+${title}
 
-${group_summary_line}发生时间：${timestamp}
-日志来源：${source_summary}
-日志级别：${level}
-事件标识：${event_id}
-请求标识：${request_identity}
-授权信息：${authorization}
-请求路径：${method} ${path}
-${operation_line}请求模型：${model}
-上游信息：${upstream_provider} / ${upstream_channel} / ${upstream_model}
-响应状态：${response_label} ${gateway_status} / 上游 ${upstream_status}
+${details}
 
 【具体错误】
-错误代码：${error_code}
-错误类型：${error_type}
-错误信息：${error_message}
-错误来源：${error_source}
+${error}
 
-【错误分析】
-分析：${judgment}
-建议：${recommendation}
+${analysis}
